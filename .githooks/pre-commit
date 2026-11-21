@@ -1,15 +1,26 @@
 #!/usr/bin/env bash
 # Blocks commits that add private IPs, credentials or company-specific strings.
-# Enable once per clone: git config core.hooksPath .githooks
+# Scans the staged content (what will actually be committed), not the working
+# tree. Enable once per clone: git config core.hooksPath .githooks
 set -euo pipefail
 
-cd "$(git rev-parse --show-toplevel)"
+root="$(git rev-parse --show-toplevel)"
+cd "$root"
 
 files=()
-while IFS= read -r f; do files+=("$f"); done < <(git diff --cached --name-only --diff-filter=ACMR)
+while IFS= read -r -d '' f; do files+=("$f"); done < <(git diff --cached --name-only -z --diff-filter=ACMR)
 [ "${#files[@]}" -gt 0 ] || exit 0
 
-if ! scripts/check-leaks.sh "${files[@]}"; then
+# Materialise the staged blobs under a temp dir at the same relative paths so
+# the guard reports the real file names with line numbers of the staged text.
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+for f in "${files[@]}"; do
+  mkdir -p "$tmp/$(dirname -- "$f")"
+  git show ":$f" >"$tmp/$f"
+done
+
+if ! (cd "$tmp" && "$root/scripts/check-leaks.sh" "${files[@]}"); then
   echo "pre-commit: leak guard failed, fix the matches above before committing" >&2
   exit 1
 fi

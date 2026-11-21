@@ -113,7 +113,7 @@ try {
                     # Value is read from the environment by docker; never printed.
                     $runArgs += @('-e', 'GITHUB_TOKEN')
                 }
-                $runArgs += @($tag, 'bash', '/src/test/run-case.sh', $case, $profile)
+                $runArgs += @($tag, 'bash', '/src/test/run-case.sh', $case, $profile, $row.Name)
 
                 $run = Invoke-Docker $runArgs
                 if ($run.ExitCode -eq 0) {

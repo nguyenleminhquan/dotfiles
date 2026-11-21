@@ -30,7 +30,14 @@ assert_fail() {
   shift
   [ "${1:-}" = "--" ] || _fail "assert_fail: missing '--' separator ($msg)"
   shift
-  if "$@" >/dev/null 2>&1; then
+  local rc=0
+  "$@" >/dev/null 2>&1 || rc=$?
+  # 126/127 mean the command could not run at all (typo, missing tool), which
+  # must not be mistaken for the expected failure.
+  if [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ]; then
+    _fail "$msg (command not found or not executable: $1)"
+  fi
+  if [ "$rc" -eq 0 ]; then
     _fail "$msg"
   fi
 }
@@ -49,8 +56,8 @@ assert_symlink() {
 }
 
 # home_hash: sha256 over every file and symlink under $HOME, skipping caches,
-# the mise data dir and shell/editor history files. Used to prove idempotence
-# and "no writes" guarantees.
+# the mise data dir, shell/editor history files and zsh completion dumps.
+# Used to prove idempotence and "no writes" guarantees.
 home_hash() {
   (
     cd "$HOME" || exit 1
@@ -58,6 +65,7 @@ home_hash() {
       \( -path ./.cache -o -path ./.local/share/mise \) -prune -o \
       \( -type f -o -type l \) \
       ! -name '*_history' ! -name '.lesshst' ! -name '.viminfo' \
+      ! -name '.zcompdump*' \
       -print0 |
       LC_ALL=C sort -z |
       while IFS= read -r -d '' path; do

@@ -47,7 +47,10 @@ for file in "${files[@]}"; do
     label="${entry%%|*}"
     regex="${entry#*|}"
     rc=0
-    hits="$(grep -nIE -e "$regex" -- "$file")" || rc=$?
+    # -a scans binary and invalid-UTF-8 files too, and LC_ALL=C keeps bytes
+    # opaque so a stray Latin-1 byte cannot hide a match. NULs are dropped
+    # because bash cannot hold them in a variable.
+    hits="$(LC_ALL=C grep -naE -e "$regex" -- "$file" | tr -d '\0'; exit "${PIPESTATUS[0]}")" || rc=$?
     if [ "$rc" -gt 1 ]; then
       printf 'check-leaks: invalid pattern (%s)\n' "$label" >&2
       exit 2

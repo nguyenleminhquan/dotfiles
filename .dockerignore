@@ -3,3 +3,8 @@
 docs
 tasks
 test/.out
+# Mirror .gitignore: machine-local files and secrets must never enter an image
+*.local
+**/*.local
+.env*
+**/.env*
