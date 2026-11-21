@@ -10,7 +10,7 @@
 #   2. backs everything up in ~/.dotfiles-backup/<timestamp>/ and writes
 #      restore.sh and links.tsv there BEFORE changing anything
 #   3. moves the old ~/.dotfiles into <backup>/old-dotfiles and removes every
-#      symlink under ~, ~/.config and ~/.local/bin that points into it
+#      symlink under $HOME that points into it (one walk, see collect_links)
 #   4. filters ~/.config/zsh/.zsh_history (or $ZDOTDIR/.zsh_history) into
 #      ~/.zsh_history: PEM blocks and everything df_history_is_secret flags are dropped
 #   5. copies ~/.gitconfig to ~/.gitconfig.local (nothing private can reach the
@@ -91,6 +91,7 @@ OLD_PHYS=""
 # --- what the run is about to do (filled by the collect_* functions) ----------------------
 LINK_PATHS=()
 LINK_TARGETS=()
+LINK_SCAN_SECS=0
 declare -A LINKSET=()
 
 HIST_SRC=""
@@ -104,8 +105,7 @@ GIT_DROPPED=()
 GIT_SKIPPED=()
 GIT_KEPT=()
 GIT_WARN=()
-GIT_INC_REWRITE=0
-GIT_INC_KEEP=()
+GIT_INC_DROP=()
 EXC_SRC=""
 declare -A G=() R=()
 G_ORDER=()
@@ -209,10 +209,37 @@ preflight() {
 }
 
 # --- the symlinks that point into the old dotfiles ------------------------------------------
-# Only $HOME, ~/.config (6 levels) and ~/.local/bin (2 levels) are searched, and
-# find neither follows symlinked directories nor crosses a mount point there.
+# _glob_escape <text>: the text as a literal in a find -path pattern.
+_glob_escape() {
+  local s="$1" out="" c i
+  for ((i = 0; i < ${#s}; i++)); do
+    c="${s:i:1}"
+    case "$c" in
+      "\\" | '*' | '?' | '[') out+="\\$c" ;;
+      *) out+="$c" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# find_all_links: "<path>\0<target>\0" for every symlink under $HOME. One walk;
+# find does not follow symlinks (a symlinked directory such as ~/data is never
+# entered) and -xdev keeps it on the filesystem of $HOME (no /mnt). Not entered:
+# the old clone, the backups, caches, credentials and trees that tools manage
+# (node_modules, git internals, mise's installs), none of which holds links
+# into the old dotfiles.
+find_all_links() {
+  local h
+  h="$(_glob_escape "$HOME")"
+  find "$HOME" -xdev \( -path "$h/.dotfiles" -o -path "$h/.dotfiles-backup" -o -path "$h/.cache" \
+    -o -path "$h/.ssh" -o -path "$h/.aws" -o -path "$h/data" -o -path "$h/.local/share/mise" \
+    -o -name node_modules -o -name .git \) -prune -o -type l -printf '%p\0%l\0'
+}
+
+# collect_links: every symlink under $HOME whose target is inside the old
+# checkout (directly, lexically, or through other links).
 collect_links() {
-  local l t abs r
+  local l t abs r t0=$SECONDS
   while IFS= read -r -d '' l && IFS= read -r -d '' t; do
     case "$l" in
       *$'\n'*)
@@ -236,17 +263,8 @@ collect_links() {
     LINK_PATHS+=("$l")
     LINK_TARGETS+=("$t")
     LINKSET["$l"]=1
-  done < <(
-    {
-      find "$HOME" -mindepth 1 -maxdepth 1 -type l -printf '%p\0%l\0'
-      if [ -d "$HOME/.config" ] && [ ! -L "$HOME/.config" ]; then
-        find "$HOME/.config" -xdev -mindepth 1 -maxdepth 6 -type l -printf '%p\0%l\0'
-      fi
-      if [ -d "$HOME/.local/bin" ] && [ ! -L "$HOME/.local" ] && [ ! -L "$HOME/.local/bin" ]; then
-        find "$HOME/.local/bin" -xdev -mindepth 1 -maxdepth 2 -type l -printf '%p\0%l\0'
-      fi
-    } 2>/dev/null
-  )
+  done < <(find_all_links 2>/dev/null)
+  LINK_SCAN_SECS=$((SECONDS - t0))
   # ~/.gitconfig is removed in every case, so a link that is not one of the old
   # ones is recorded too (restore.sh recreates it).
   if [ -L "$HOME/.gitconfig" ] && [ -z "${LINKSET["$HOME/.gitconfig"]+x}" ]; then
@@ -271,6 +289,8 @@ locate_history() {
   fi
   if [ -n "$v" ]; then
     v="${v%%[[:space:]]\#*}"
+    v="${v#"${v%%[![:space:]]*}"}" # trim, so that `"…"  # comment` is left with just the quotes
+    v="${v%"${v##*[![:space:]]}"}"
     v="${v#\"}"
     v="${v%\"}"
     v="${v#\'}"
@@ -340,11 +360,11 @@ _h_entry() {
 
 # filter_history <in> <out>: copy the extended-format history, entry by entry
 # and in order, without the secrets. An entry is a line plus its continuation
-# lines (a line ending in an odd number of backslashes continues); plain lines
-# of the older format are entries too. One pass, no fork per entry: the rules
+# lines (a line ending in a backslash continues, as in zsh); plain lines of the
+# older format are entries too. One pass, no fork per entry: the rules
 # are df_history_is_secret itself, called as a function.
 filter_history() {
-  local in="$1" out="$2" line entry="" have=0 cont=0 t
+  local in="$1" out="$2" line entry="" have=0 cont=0
   local LC_ALL=C
   _h_pend=()
   _h_block=0
@@ -359,11 +379,12 @@ filter_history() {
       entry="$line"
       have=1
     fi
+    # Like zsh's reader (readhistline): any line ending in a backslash is
+    # continued, whatever precedes it. zsh's writer puts a backslash before
+    # every embedded newline and does not escape the backslashes already
+    # there, so a typed `curl \<newline> -H x` is stored as `curl \\<newline> -H x`.
     cont=0
-    if [[ $line == *\\ ]]; then
-      t="${line##*[!\\]}"
-      if [ $((${#t} % 2)) = 1 ]; then cont=1; fi
-    fi
+    if [[ $line == *\\ ]]; then cont=1; fi
   done <"$in"
   if [ "$have" = 1 ]; then _h_entry "$entry"; fi
   if [ "$_h_block" = 1 ]; then _h_release; fi
@@ -400,6 +421,50 @@ split_vals() {
     _sv_out+=("$v")
     s="${s#*"$US"}"
   done
+}
+
+# _re_escape <text>: the text as a literal in an extended regular expression.
+_re_escape() {
+  local s="$1" out="" c i
+  for ((i = 0; i < ${#s}; i++)); do
+    c="${s:i:1}"
+    case "$c" in
+      "\\" | '.' | '[' | ']' | '{' | '}' | '(' | ')' | '*' | '+' | '?' | '^' | '$' | '|') out+="\\$c" ;;
+      *) out+="$c" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# --- masking: what is printed must not carry a secret ------------------------------------------
+# mask_userinfo <text>: "user:password@" in a URL becomes "<hidden>@". Result in $MASKED.
+mask_userinfo() {
+  local s="$1"
+  while [[ $s =~ ://[^/@[:space:]]+:[^/@[:space:]]+@ ]]; do
+    s="${s/"${BASH_REMATCH[0]}"/://<hidden>@}"
+  done
+  MASKED="$s"
+}
+
+# looks_secret <text>: the history rules (the one definition), after removing the
+# spaces around "=" that config files have and command lines do not.
+looks_secret() {
+  local s="${1// = /=}"
+  s="${s// =/=}"
+  s="${s//= /=}"
+  df_history_is_secret "$s"
+}
+
+# masked_kv <key> <value>: "key = value" that is safe to print.
+masked_kv() {
+  local k v
+  mask_userinfo "$1"
+  k="$MASKED"
+  mask_userinfo "$2"
+  v="$MASKED"
+  if looks_secret "$k"; then k="<hidden key>"; fi
+  if looks_secret "$k=$v"; then v="<hidden>"; fi
+  printf '%s = %s' "$k" "$v"
 }
 
 # check_old_ref <key> <values>: warn about a value that names the old checkout.
@@ -443,18 +508,22 @@ plan_excludes() {
 # point at an empty or missing file are dropped, the others stay.
 plan_includes() {
   local -a vals
-  local v p
+  local v p d seen
   split_vals "$1" vals
   for v in "${vals[@]}"; do
     [ -n "$v" ] || continue
     p="$(tilde "$v")"
     case "$p" in /*) ;; *) p="$2/$p" ;; esac
     if [ -s "$p" ]; then
-      GIT_INC_KEEP+=("$v")
       case "$v" in /* | "$TILDE"/*) ;; *) GIT_WARN+=("include.path = $v is relative and may not resolve from ~/.gitconfig.local") ;; esac
       check_old_ref include.path "$v"
     else
-      GIT_INC_REWRITE=1
+      seen=0
+      for d in ${GIT_INC_DROP[@]+"${GIT_INC_DROP[@]}"}; do
+        if [ "$d" = "$v" ]; then seen=1; fi
+      done
+      # One unset removes every copy of a repeated value.
+      if [ "$seen" = 0 ]; then GIT_INC_DROP+=("$v"); fi
       GIT_DROPPED+=("include.path = $v: dropped, the file is empty or missing")
     fi
   done
@@ -505,12 +574,11 @@ build_gitlocal() {
   for key in ${GIT_UNSET[@]+"${GIT_UNSET[@]}"}; do
     git config --file "$dest" --unset-all "$key"
   done
-  if [ "$GIT_INC_REWRITE" = 1 ]; then
-    git config --file "$dest" --unset-all include.path
-    for v in ${GIT_INC_KEEP[@]+"${GIT_INC_KEEP[@]}"}; do
-      git config --file "$dest" --add include.path "$v"
-    done
-  fi
+  # Only the dropped include.path values are removed, in place: git applies an
+  # include where it stands, so the kept ones must keep their order.
+  for v in ${GIT_INC_DROP[@]+"${GIT_INC_DROP[@]}"}; do
+    git config --file "$dest" --unset-all include.path "^$(_re_escape "$v")\$"
+  done
 }
 
 # report_git: what the split does, and the keys the user may want in the repo.
@@ -522,9 +590,18 @@ report_git() {
     return 0
   fi
   log_info "git: ~/.gitconfig ($GIT_KIND) becomes ~/.gitconfig.local; ${#GIT_KEPT[@]} keys stay, ${#GIT_SKIPPED[@]} are skipped (config/git/config has them), ${#GIT_DROPPED[@]} are dropped"
-  for key in ${GIT_DROPPED[@]+"${GIT_DROPPED[@]}"}; do log_info "git: $key"; done
-  for key in ${GIT_SKIPPED[@]+"${GIT_SKIPPED[@]}"}; do log_info "git: $key: skipped, config/git/config sets the same"; done
-  for key in ${GIT_WARN[@]+"${GIT_WARN[@]}"}; do log_warn "git: $key"; done
+  for key in ${GIT_DROPPED[@]+"${GIT_DROPPED[@]}"}; do
+    mask_userinfo "$key"
+    log_info "git: $MASKED"
+  done
+  for key in ${GIT_SKIPPED[@]+"${GIT_SKIPPED[@]}"}; do
+    mask_userinfo "$key"
+    log_info "git: $MASKED: skipped, config/git/config sets the same"
+  done
+  for key in ${GIT_WARN[@]+"${GIT_WARN[@]}"}; do
+    mask_userinfo "$key"
+    log_warn "git: $MASKED"
+  done
   printf '\nKeys that stay only in ~/.gitconfig.local. Nothing was added to the repo;\ncopy what you want to share into config/git/config yourself:\n'
   for key in ${GIT_KEPT[@]+"${GIT_KEPT[@]}"}; do
     vals="${G["$key"]}"
@@ -535,10 +612,11 @@ report_git() {
         identity=$((identity + 1))
         ;;
       *)
+        mask_userinfo "$key"
         if [ "$n" -gt 1 ]; then
-          printf '  %s (%d values)\n' "$key" "$n"
+          printf '  %s (%d values)\n' "$MASKED" "$n"
         else
-          printf '  %s = %s\n' "$key" "${parts[0]}"
+          printf '  %s\n' "$(masked_kv "$key" "${parts[0]}")"
         fi
         ;;
     esac
@@ -554,7 +632,24 @@ report_mise() {
     printf '  no ~/.config/mise/config.toml\n\n'
     return 0
   fi
-  diff -u --label "old ~/.config/mise/config.toml" --label "new config.workstation.toml" "$old" "$new" || true
+  # Lines that look like a secret (an [env] token, a URL with a password) are
+  # not shown; the file itself is in the backup.
+  local line
+  { diff -u --label "old ~/.config/mise/config.toml" --label "new config.workstation.toml" "$old" "$new" || true; } |
+    while IFS= read -r line; do
+      mask_userinfo "$line"
+      line="$MASKED"
+      case "$line" in
+        '---'* | '+++'* | '@@'*) printf '%s\n' "$line" ;;
+        *)
+          if looks_secret "${line:1}"; then
+            printf '%s<hidden: looks like a secret>\n' "${line:0:1}"
+          else
+            printf '%s\n' "$line"
+          fi
+          ;;
+      esac
+    done
   printf '\n'
 }
 
@@ -574,7 +669,7 @@ report_plan() {
     if [ -e "$HOME/$item" ] || [ -L "$HOME/$item" ]; then log_info "backup: $verb save ~/$item"; fi
   done
   log_info "move: $verb move $OLD to <backup>/old-dotfiles"
-  log_info "links: $verb remove ${#LINK_PATHS[@]} symlinks that point into the old dotfiles"
+  log_info "links: found ${#LINK_PATHS[@]} symlinks that point into the old dotfiles (walk of $HOME: ${LINK_SCAN_SECS}s); $verb remove them all"
   for i in "${!LINK_PATHS[@]}"; do
     log_info "  unlink ${LINK_PATHS[$i]} -> ${LINK_TARGETS[$i]}"
   done
@@ -622,7 +717,15 @@ _sha() { sha256sum <"$1" | cut -d' ' -f1; }
 # step in it checks the current state, so it works after a failed run, can be
 # repeated, and never overwrites what exists.
 write_restore() {
-  local f="$BK/restore.sh" i
+  local f="$BK/restore.sh" i sha_hist="" sha_local="" sha_ignore=""
+  # Hashed first, outside the printf arguments below: set -e does not see a
+  # failing command substitution inside printf's arguments.
+  if [ -f "$BK/staged/zsh_history" ]; then sha_hist="$(_sha "$BK/staged/zsh_history")"; fi
+  if [ -f "$BK/staged/gitconfig.local" ]; then sha_local="$(_sha "$BK/staged/gitconfig.local")"; fi
+  if [ -f "$BK/staged/git-ignore" ]; then sha_ignore="$(_sha "$BK/staged/git-ignore")"; fi
+  if [ -f "$BK/staged/zsh_history" ] && [ -z "$sha_hist" ]; then die "could not hash the staged history for restore.sh"; fi
+  if [ -f "$BK/staged/gitconfig.local" ] && [ -z "$sha_local" ]; then die "could not hash the staged gitconfig.local for restore.sh"; fi
+  if [ -f "$BK/staged/git-ignore" ] && [ -z "$sha_ignore" ]; then die "could not hash the staged ignore file for restore.sh"; fi
   {
     cat <<'EOF'
 #!/usr/bin/env bash
@@ -727,19 +830,19 @@ EOF
     # The $HOME and $BK below are written into restore.sh to be expanded when it runs.
     # shellcheck disable=SC2016
     if [ -f "$BK/staged/zsh_history" ]; then
-      printf 'undo_created "$HOME/.zsh_history" %s' "$(_sha "$BK/staged/zsh_history")"
+      printf 'undo_created "$HOME/.zsh_history" %s' "$sha_hist"
       if [ "$HIST_PREEXISTED" = 1 ]; then printf ' "$BK/.zsh_history"'; fi
       printf '\n'
     fi
     # shellcheck disable=SC2016
     if [ -f "$BK/staged/gitconfig.local" ]; then
-      printf 'undo_created "$HOME/.gitconfig.local" %s' "$(_sha "$BK/staged/gitconfig.local")"
+      printf 'undo_created "$HOME/.gitconfig.local" %s' "$sha_local"
       if [ "$GITLOCAL_PREEXISTED" = 1 ]; then printf ' "$BK/.gitconfig.local"'; fi
       printf '\n'
     fi
     # shellcheck disable=SC2016
     if [ -f "$BK/staged/git-ignore" ]; then
-      printf 'undo_created "$HOME/.config/git/ignore" %s\n' "$(_sha "$BK/staged/git-ignore")"
+      printf 'undo_created "$HOME/.config/git/ignore" %s\n' "$sha_ignore"
     fi
     cat <<'EOF'
 
@@ -873,3 +976,6 @@ apply
 log_info "migrated. Open a new terminal to check the shell."
 log_info "backup: $BK"
 log_info "roll back: dotfiles uninstall && bash $BK/restore.sh"
+if [ -z "${DOTFILES_REPO:-}" ]; then
+  log_info "\`dotfiles update\` has no source yet (this install was copied from $self_root): run install.sh once with DOTFILES_REPO=<repo url>, or run this migration again with it set"
+fi

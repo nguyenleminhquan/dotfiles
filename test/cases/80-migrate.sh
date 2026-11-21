@@ -14,8 +14,59 @@ export DOTFILES_NO_TOOLS=1
 mig=/src/tools/migrate-from-nobitagamer.sh
 fx="$(mktemp -d)"
 mkdir -p "$fx/win"
+# A made-up token, built in pieces so that this file holds no token-shaped text.
+tok="glpat-""aaaaaaaaaaaaaaaaaaaa"
 
 # --- fixture ------------------------------------------------------------------------------
+# History written by the real zsh, which is what the migration will read: its
+# writer puts a backslash before every embedded newline and does not escape the
+# backslashes already there, so a typed `curl \<newline> -H x` is stored as `\\<newline>`.
+# zsh_history_entries sets zh_all (the commands typed) and zh_kept (those that survive).
+zsh_history_entries() {
+  zh_all=(
+    $'curl https://api.example.com \\\n  -H "Authorization: Bearer abc"'
+    ls
+    $'mysql -u root \\\n  --password=hunter2 \\\n  -h db'
+    date
+    $'echo one \\\n  two'
+    $'psql -h db \\\n  -c "select 1" \\\n  --password=hunter3'
+    $'cat <<EOF\nhello\nEOF'
+  )
+  zh_kept=(ls date $'echo one \\\n  two' $'cat <<EOF\nhello\nEOF')
+}
+# zsh only saves and reads its history file in an interactive shell, so both
+# helpers run a small script in a pty (script(1), as 70-workstation.sh does).
+# zsh_write_history <file> <entries...>
+zsh_write_history() {
+  local f="$1"
+  shift
+  printf '%s\0' "$@" >"$fx/zsh-entries"
+  cat >"$fx/zsh-write.zsh" <<'ZSH'
+setopt extendedhistory
+HISTSIZE=1000
+SAVEHIST=1000
+HISTFILE=$ZH_FILE
+while IFS= read -r -d '' e; do print -rs -- "$e"; done <$ZH_ENTRIES
+fc -W
+ZSH
+  script -qec "env ZH_FILE='$f' ZH_ENTRIES='$fx/zsh-entries' zsh -f -i '$fx/zsh-write.zsh'" /dev/null </dev/null >/dev/null
+}
+# zsh_entries <file>: the entries as zsh reads them, each ended by "@@END@@".
+zsh_entries() {
+  cat >"$fx/zsh-read.zsh" <<'ZSH'
+setopt extendedhistory
+HISTSIZE=100000
+fc -R $ZH_FILE
+# fc -R, then one more entry: the last entry of the list is the "current" event
+# and is left out of $history, so the extra one takes that place.
+print -rs -- ZH_SENTINEL
+: >$ZH_OUT
+for k in ${(onk)history}; do print -rn -- "${history[$k]}@@END@@" >>$ZH_OUT; done
+ZSH
+  script -qec "env ZH_FILE='$1' ZH_OUT='$fx/zsh-out' zsh -f -i '$fx/zsh-read.zsh'" /dev/null </dev/null >/dev/null
+  sed 's/ZH_SENTINEL@@END@@$//' "$fx/zsh-out"
+}
+
 # mklink <home> <target> <path relative to home>: a link into the old setup, remembered.
 mklink() {
   mkdir -p "$(dirname "$1/$3")"
@@ -107,15 +158,19 @@ make_old_home() {
 	editor = /usr/bin/nvim
 	excludesfile = ~/.gitignore_global
 [include]
+	path = ~/.gitconfig_extra
 	path = ~/.gitconfig_local
+	path = ~/.gitconfig_extra2
 [push]
 	default = matching
 [hub]
 	protocol = https
 EOF
+  # A made-up token (built in pieces so that this file holds no token-shaped text).
+  printf '[url "https://oauth2:%s@host.example"]\n\tinsteadOf = https://host.example/\n[http]\n\textraHeader = Authorization: Bearer abc\n' "$tok" >>"$o/development/git/gitconfig"
   printf '*.swp\n.idea/\n' >"$o/development/git/gitignore_global"
   if [ "${V_ZDOT:-0}" = 1 ]; then
-    printf 'export ZDOTDIR="$HOME/zdot"\n' >"$o/shells/zsh/zshenv"
+    printf 'export ZDOTDIR="$HOME/zdot"  # two spaces before this comment\n' >"$o/shells/zsh/zshenv"
   else
     printf 'export ZDOTDIR=~/.config/zsh\n' >"$o/shells/zsh/zshenv"
   fi
@@ -124,6 +179,7 @@ EOF
   printf '# old bashrc\n' >"$o/shells/bash/bashrc"
   printf '# old bash_profile\n' >"$o/shells/bash/bash_profile"
   printf '[tools]\nnode = "20"\nopentofu = "1.13.9"\n' >"$o/apps/mise/config.toml"
+  printf '[env]\nGITLAB_TOKEN = "%s"\n' "$tok" >>"$o/apps/mise/config.toml"
   printf 'format = "$all"\n' >"$o/apps/starship.toml"
   printf '{ "autosave": 5 }\n' >"$o/apps/micro/settings.json"
   printf 'set -g mouse on\n' >"$o/shells/tmux.conf"
@@ -150,11 +206,24 @@ EOF
   mklink "$h" "$h/.config/zsh/.zshrc" .config/chain
   mklink "$h" "$o/gone" .config/dangling
   mklink "$h" "$o/shells/vimrc" .config/deep/a/b/c/link
+  mkdir -p "$o/with space"
+  printf '# a file whose directory has a space\n' >"$o/with space/rc"
+  mklink "$h" "$o/with space/rc" ".config/spaced link"
+  mklink "$h" "$o/shells/inputrc" .local/share/x/y
+  mklink "$h" "$o/shells/vimrc" bin/z
   printf '# real profile\n' >"$h/.profile"
   : >"$h/.gitconfig_local"
+  printf '[extra]\n\tone = 1\n' >"$h/.gitconfig_extra"
+  printf '[extra]\n\ttwo = 2\n' >"$h/.gitconfig_extra2"
   printf 'compdump\n' >"$h/.config/zsh/.zcompdump"
 
-  if [ "${V_ZDOT:-0}" = 1 ]; then
+  if [ "${V_NOHIST:-0}" = 1 ]; then
+    :
+  elif [ "${V_ZHIST:-0}" = 1 ]; then
+    zsh_history_entries
+    zsh_write_history "$h/.config/zsh/.zsh_history" "${zh_all[@]}"
+    zsh_write_history "$h.hist-expected" "${zh_kept[@]}"
+  elif [ "${V_ZDOT:-0}" = 1 ]; then
     mkdir -p "$h/zdot"
     printf ': 1700001001:0;ls -la\n: 1700001004:0;export TOKEN=x\n: 1700001002:0;git status\n' >"$h/zdot/.zsh_history"
     printf ': 1700001001:0;ls -la\n: 1700001002:0;git status\n' >"$h.hist-expected"
@@ -246,12 +315,21 @@ assert_file_absent "$a/.gitconfig.local"
 for want in "unlink $a/.gitconfig -> " "unlink $a/.config/zsh/aliases/git.zsh -> " "unlink $a/.config/chain -> " \
   "core.editor: dropped" "include.path = ~/.gitconfig_local: dropped" "core.excludesfile: dropped" \
   "alias.s: skipped" "alias.co = checkout" "push.default = matching" "hub.protocol = https" \
-  "safe.directory (4 values)" "history:" "would be kept" "would remove 16 symlinks" \
+  "safe.directory (4 values)" "history:" "would be kept" "found 19 symlinks that point into the old dotfiles" "walk of " \
   "would run: DOTFILES_SRC=/src bash /src/install.sh --profile workstation" \
   'config.workstation.toml' '-node = "20"' "dry run done: nothing was written"; do
   assert_ok "dry run says: $want" -- grep -qF -- "$want" <<<"$dry_out"
 done
 assert_fail "dry run never prints the identity values" -- grep -qF -e test.user@example.com -e 0123456789ABCDEF <<<"$dry_out"
+# Secrets that sit in printed values are masked: a token in a URL (key and
+# value), an Authorization header, an [env] token in the mise diff.
+for secret in "$tok" 'Bearer abc' 'oauth2:'; do
+  assert_fail "dry run never prints a token ($secret)" -- grep -qF -- "$secret" <<<"$dry_out"
+done
+for want in 'http.extraheader = <hidden>' 'url.https://<hidden>@host.example.insteadof = https://host.example/' \
+  '-<hidden: looks like a secret>'; do
+  assert_ok "dry run masks: $want" -- grep -qF -- "$want" <<<"$dry_out"
+done
 
 # --- case_refusals: only the old setup is migrated -------------------------------------------
 g="$fx/g1"
@@ -320,9 +398,21 @@ assert_eq "$(git config --file "$lc" --get-all safe.directory | wc -l | tr -d ' 
 assert_eq "$(git config --file "$lc" --get-all safe.directory | sed -n 3p)" "/srv/with space/proj#1" "a safe.directory with a space and a # survives"
 assert_eq "$(git config --file "$lc" alias.co)" checkout "an alias that the repo lacks survives"
 assert_eq "$(git config --file "$lc" push.default)" matching "push.default survives"
+assert_eq "$(git config --file "$lc" http.extraheader)" "Authorization: Bearer abc" "an Authorization header stays in gitconfig.local (it is only masked in the output)"
+assert_ok "so does a URL with a token" -- grep -qF "oauth2:$tok@host.example" "$lc"
+assert_eq "$(git config --file "$lc" --get-all include.path | paste -sd ' ' -)" "~/.gitconfig_extra ~/.gitconfig_extra2" \
+  "kept includes keep their order, only the empty one is gone"
+assert_ok "the run printed no token" -- test "$(grep -cF -e "$tok" -e 'Bearer abc' <<<"$out")" = 0
+assert_ok "the run masked the header" -- grep -qF 'http.extraheader = <hidden>' <<<"$out"
+assert_ok "the run says how to get updates" -- grep -qF 'DOTFILES_REPO=<repo url>' <<<"$out"
+assert_eq "$(git config --file "$a/.config/git/config" --get-all include.path | wc -l | tr -d ' ')" 2 "the generated global config includes the repo and the local file"
+assert_ok "the link in ~/.local/share is gone" -- test ! -L "$a/.local/share/x/y"
+assert_ok "the link in ~/bin is gone" -- test ! -L "$a/bin/z"
+assert_ok "the link whose target has a space is gone" -- test ! -L "$a/.config/spaced link"
+assert_ok "and links.tsv has it with its target" -- grep -qF "$(printf '%s\t%s' "$a/.config/spaced link" "$a/.dotfiles/with space/rc")" "$bk/links.tsv"
 assert_fail "core.editor is gone" -- git config --file "$lc" core.editor
 assert_fail "alias.s is not repeated (the repo has it)" -- git config --file "$lc" alias.s
-assert_fail "the include of the empty file is gone" -- git config --file "$lc" include.path
+assert_fail "the include of the empty file is gone" -- grep -qxF '~/.gitconfig_local' <<<"$(git config --file "$lc" --get-all include.path)"
 assert_fail "the excludes file key is gone" -- git config --file "$lc" core.excludesfile
 assert_eq "$(stat -c %a "$lc")" 600 "gitconfig.local is private"
 assert_eq "$(gitc "$a" user.email)" test.user@example.com "git config user.email reads the old value through the include"
@@ -351,7 +441,7 @@ done <"$a.expected-links"
 for rel in .gitconfig .tmux.conf .vimrc .inputrc .gitignore_global .config/zsh/.zshrc .config/zsh/aliases/git.zsh .config/chain .config/dangling; do
   assert_file_absent "$a/$rel"
 done
-assert_eq "$(wc -l <"$a.expected-links" | tr -d ' ')" 16 "the fixture has 16 links into the old setup"
+assert_eq "$(wc -l <"$a.expected-links" | tr -d ' ')" 19 "the fixture has 19 links into the old setup"
 assert_eq "$(readlink "$a/.ssh")" "$a.win/ssh" "a link outside the old setup is untouched"
 assert_eq "$(readlink "$a/data")" "$a.win/data" "so is a link to a directory"
 assert_eq "$(readlink "$a.win/data/trap")" "$a/.dotfiles/shells/zsh/zshrc" "a symlinked directory is not entered"
@@ -417,8 +507,8 @@ rout="$(cd / && HOME="$a" bash "$bk/restore.sh" 2>&1)" || { printf '%s\n' "$rout
 assert_ok "restore.sh prints what it does" -- grep -qF 'moving' <<<"$rout"
 assert_eq "$(tree_hash "$a")" "$hash_before" "after migrate, uninstall and restore.sh the home is byte for byte what it was"
 # The only things left over are the empty directories the install made.
-assert_eq "$(LC_ALL=C comm -13 <(printf '%s\n' "$list_before") <(tree_list "$a"))" "$(printf '%s\n' ./.local ./.local/bin)" \
-  "no file or directory is left over except the empty ones the install made"
+assert_eq "$(LC_ALL=C comm -13 <(printf '%s\n' "$list_before") <(tree_list "$a"))" ./.local/bin \
+  "no file or directory is left over except the empty ~/.local/bin the install made"
 assert_ok "~/.gitconfig resolves again" -- test -e "$a/.gitconfig"
 assert_ok "~/.gitconfig is the old content" -- cmp -s "$a/.gitconfig" "$fx/old-gitconfig"
 assert_file_absent "$a/.zsh_history"
@@ -475,6 +565,64 @@ assert_ok "the history that lives outside ~/.config/zsh is backed up too" -- cmp
 (cd / && HOME="$f" bash "$f/.local/bin/dotfiles" uninstall >/dev/null 2>&1) || _fail "dotfiles uninstall failed (variant)"
 rout="$(cd / && HOME="$f" bash "$bk_f/restore.sh" 2>&1)" || { printf '%s\n' "$rout" >&2; _fail "restore.sh failed (variant)"; }
 assert_eq "$(tree_hash "$f")" "$f_before" "the variant is restored byte for byte, the empty history included"
+
+# --- case_zsh_history: history written by the real zsh, \ continuations holding secrets ----
+command -v zsh >/dev/null 2>&1 || _fail "the u20-ws row has zsh"
+z="$fx/z"
+V_BIG=0 V_ZHIST=1 make_old_home "$z"
+zh="$z/.config/zsh/.zsh_history"
+assert_ok "the fixture has zsh's doubled backslash before the newline" -- grep -qxF "mysql -u root \\\\" <<<"$(sed 's/^: [0-9]*:[0-9]*;//' "$zh")"
+assert_eq "$(zsh_entries "$zh" | grep -o '@@END@@' | wc -l | tr -d ' ')" 7 "zsh reads 7 entries from the fixture"
+rc=0
+out="$(run_mig "$z")" || rc=$?
+if [ "$rc" -ne 0 ]; then printf '%s\n' "$out" >&2; _fail "migrate with a zsh-written history failed"; fi
+assert_eq "$(zsh_entries "$z/.zsh_history" | grep -o '@@END@@' | wc -l | tr -d ' ')" 4 "zsh reads 4 entries from the filtered history: whole commands only"
+assert_eq "$(zsh_entries "$z/.zsh_history")" "$(zsh_entries "$z.hist-expected")" "the entries zsh reads are exactly the ordinary ones"
+assert_fail "no part of a secret command is left" -- grep -qE 'hunter|Authorization|api.example|select 1|root' "$z/.zsh_history"
+
+# --- case_no_history: nothing to filter is not an error ---------------------------------------
+n="$fx/n"
+V_NOHIST=1 make_old_home "$n"
+n_before="$(tree_hash "$n")"
+dry="$(run_mig "$n" --dry-run)" || { printf '%s\n' "$dry" >&2; _fail "dry run without a history failed"; }
+assert_ok "the dry run notes that there is no history" -- grep -qF 'no .zsh_history found' <<<"$dry"
+assert_eq "$(tree_hash "$n")" "$n_before" "and writes nothing"
+rc=0
+out="$(run_mig "$n")" || rc=$?
+if [ "$rc" -ne 0 ]; then printf '%s\n' "$out" >&2; _fail "migrate without a history failed"; fi
+assert_ok "the run notes that there is no history" -- grep -qF 'no .zsh_history found' <<<"$out"
+assert_file_absent "$n/.zsh_history"
+bk_n="$(backup_of "$n")"
+(cd / && HOME="$n" bash "$n/.local/bin/dotfiles" uninstall >/dev/null 2>&1) || _fail "dotfiles uninstall failed (no history)"
+rout="$(cd / && HOME="$n" bash "$bk_n/restore.sh" 2>&1)" || { printf '%s\n' "$rout" >&2; _fail "restore.sh failed (no history)"; }
+assert_eq "$(tree_hash "$n")" "$n_before" "restored byte for byte (no history)"
+
+# --- case_partial_install: an install that got as far as its manifest -------------------------
+cp -a /src "$fx/partial"
+cat >"$fx/partial/install.sh" <<'PARTIAL'
+#!/usr/bin/env bash
+mkdir -p "$HOME/.config/dotfiles"
+printf '%s\n' "$HOME/.zshrc" >"$HOME/.config/dotfiles/links"
+echo "partial install" >&2
+exit 1
+PARTIAL
+p="$fx/p"
+make_old_home "$p"
+p_before="$(tree_hash "$p")"
+rc=0
+out="$(MIG="$fx/partial/tools/migrate-from-nobitagamer.sh" run_mig "$p")" || rc=$?
+assert_ok "the partial install fails the migration" -- test "$rc" -ne 0
+assert_ok "and the output says how to roll back" -- grep -qF 'restore.sh' <<<"$out"
+bk_p="$(backup_of "$p")"
+p_mid="$(tree_hash "$p")"
+rc=0
+rout="$(cd / && HOME="$p" bash "$bk_p/restore.sh" 2>&1)" || rc=$?
+assert_ok "restore.sh refuses while the install's manifest exists" -- test "$rc" -ne 0
+assert_ok "and says to uninstall first" -- grep -qF 'dotfiles uninstall' <<<"$rout"
+assert_eq "$(tree_hash "$p")" "$p_mid" "a refused restore.sh changes nothing"
+rm "$p/.config/dotfiles/links" # what uninstall.sh does with it
+rout="$(cd / && HOME="$p" bash "$bk_p/restore.sh" 2>&1)" || { printf '%s\n' "$rout" >&2; _fail "restore.sh failed after the manifest was removed"; }
+assert_eq "$(tree_hash "$p")" "$p_before" "then restore.sh brings back the exact state"
 
 # The real home was never touched.
 assert_file_absent "$HOME/.dotfiles-backup"
