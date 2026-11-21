@@ -23,7 +23,8 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 # regex on the case name, default: all) and Env (variables set in the container).
 # u20-ws is the workstation row: it pretends to be WSL1 (DF_PROC_VERSION_FILE
 # points at a fixture) and runs only the cases that know that profile, because
-# its install downloads python, opencode and opentofu.
+# its install downloads python, opencode and opentofu. 80-migrate also runs only there: it
+# needs git and the WSL1 pretence (the other rows load the case and skip it).
 $rows = @(
     @{ Name = 'u20-zsh';   Base = 'ubuntu:20.04';    Zsh = 1; Git = 1 }
     @{ Name = 'u20-nozsh'; Base = 'ubuntu:20.04';    Zsh = 0; Git = 1 }
@@ -31,7 +32,7 @@ $rows = @(
     @{ Name = 'u24-nogit'; Base = 'ubuntu:24.04';    Zsh = 1; Git = 0 }
     @{ Name = 'r9';        Base = 'rockylinux:9';    Zsh = 1; Git = 1 }
     @{ Name = 'u20-ws';    Base = 'ubuntu:20.04';    Zsh = 1; Git = 1
-       Profiles = @('workstation'); Cases = '^(00|60|70)-'
+       Profiles = @('workstation'); Cases = '^(00|60|70|80)-'
        Env = @{ DF_PROC_VERSION_FILE = '/src/test/fixtures/proc-version-wsl1' } }
 )
 $defaultProfiles = @('minimal', 'server')
