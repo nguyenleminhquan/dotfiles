@@ -43,6 +43,10 @@ case "$-" in
   *i*) _df_where=front ;;
   *) _df_where=back ;;
 esac
+# ~/bin is where the distributions' skeleton profiles put user scripts, but only
+# when it exists. ~/.local/bin gets the same treatment (and, in an interactive
+# shell, ends up in front of it).
+if [ -d "$HOME/bin" ]; then _df_path_add "$_df_where" "$HOME/bin"; fi
 _df_path_add "$_df_where" "$HOME/.local/bin"
 # The mise shims belong to the profiles that install tools; a minimal host
 # never resolves a command through them.

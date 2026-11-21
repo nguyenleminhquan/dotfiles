@@ -1,6 +1,19 @@
 # shellcheck shell=bash
 # Read by interactive bash and by `ssh host cmd`, so everything before the
 # interactive guard must be silent and cheap.
+
+# RHEL family: the stock ~/.bashrc sourced /etc/bashrc in every mode, and that
+# is what pulls /etc/profile.d (proxies, PATH, locale) into `ssh host cmd` and
+# ansible. Do the same, silenced, once per shell and before env.sh, so that the
+# system's PATH comes first and ours is appended last. Debian-family hosts have
+# no /etc/bashrc (bash reads /etc/bash.bashrc itself there). DF_ETC_BASHRC
+# overrides the path for the tests.
+if [[ -z ${_df_etc_bashrc_done:-} && -r ${DF_ETC_BASHRC:-/etc/bashrc} ]]; then
+  _df_etc_bashrc_done=1
+  # shellcheck source=/dev/null
+  . "${DF_ETC_BASHRC:-/etc/bashrc}" >/dev/null 2>&1
+fi
+
 # Where the checkout lives: the environment wins, then the location the
 # installer recorded (needed for a non-default DOTFILES_DIR), then ~/.dotfiles.
 if [ -z "${DOTFILES_DIR:-}" ]; then
@@ -58,14 +71,6 @@ if _df_can_switch_to_zsh; then
 fi
 unset -f _df_has_script_arg _df_can_switch_to_zsh
 
-# RHEL-family bash does not read /etc/bashrc by itself (their skeleton
-# ~/.bashrc did), so do it once per shell. DF_ETC_BASHRC overrides the path.
-if [[ -z ${_df_etc_bashrc_done:-} && -r ${DF_ETC_BASHRC:-/etc/bashrc} ]]; then
-  _df_etc_bashrc_done=1
-  # shellcheck source=/dev/null
-  . "${DF_ETC_BASHRC:-/etc/bashrc}"
-fi
-
 # Interactive setup shared with zsh. netdebug comes last: netshoot uses the
 # kube helpers that tools.sh loads.
 for _df_f in aliases history tools netdebug; do
@@ -75,6 +80,25 @@ for _df_f in aliases history tools netdebug; do
   fi
 done
 unset _df_f
+
+# What the distribution's skeleton ~/.bashrc used to do for interactive shells
+# and that our file replaces: the user's ~/.bashrc.d/*.sh (the RHEL skeleton's
+# convention), and bash completion, which Debian and Ubuntu enable from the
+# skeleton rather than from /etc/bash.bashrc. A login shell gets completion
+# from /etc/profile.d, and an already loaded one is left alone.
+for _df_f in "$HOME"/.bashrc.d/*.sh; do
+  if [ -f "$_df_f" ]; then
+    # shellcheck source=/dev/null
+    . "$_df_f"
+  fi
+done
+unset _df_f
+# DF_BASH_COMPLETION overrides the path for the tests.
+if ! shopt -q login_shell && ! shopt -oq posix &&
+  [[ -z ${BASH_COMPLETION_VERSINFO:-} && -r ${DF_BASH_COMPLETION:-/usr/share/bash-completion/bash_completion} ]]; then
+  # shellcheck source=/dev/null
+  . "${DF_BASH_COMPLETION:-/usr/share/bash-completion/bash_completion}"
+fi
 
 if [ -r "$HOME/.bashrc.local" ]; then
   # shellcheck source=/dev/null

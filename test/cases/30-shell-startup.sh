@@ -116,13 +116,71 @@ if command -v zsh >/dev/null; then
   esac
 fi
 
-# case_etc_bashrc_sourced_once_when_interactive
+# case_etc_bashrc: sourced once per shell, silenced, in every bash mode (the
+# RHEL skeleton ~/.bashrc did the same), and before env.sh so that our PATH
+# entries stay last.
 fx="$(mktemp -d)"
-printf 'echo x >>"%s/etc-count"\n' "$fx" >"$fx/etc-bashrc"
+printf 'echo x >>"%s/etc-count"\necho noise; echo noise >&2\nPATH=/opt/system-first:$PATH\n' "$fx" >"$fx/etc-bashrc"
 printf '. ~/.bashrc\n. ~/.bashrc\nexit\n' | DF_ETC_BASHRC="$fx/etc-bashrc" bash -i >/dev/null 2>&1
 assert_eq "$(wc -l <"$fx/etc-count" | tr -d ' ')" "1" "/etc/bashrc sourced once per interactive shell"
-DF_ETC_BASHRC="$fx/etc-bashrc" bash -c '. ~/.bashrc'
-assert_eq "$(wc -l <"$fx/etc-count" | tr -d ' ')" "1" "/etc/bashrc not sourced non-interactively"
+assert_eq "$(DF_ETC_BASHRC="$fx/etc-bashrc" bash -c '. ~/.bashrc; echo ok' 2>&1)" "ok" "/etc/bashrc is silent non-interactively"
+assert_eq "$(wc -l <"$fx/etc-count" | tr -d ' ')" "2" "/etc/bashrc sourced by a non-interactive bash too"
+assert_eq "$(DF_ETC_BASHRC="$fx/etc-bashrc" bash -c '. ~/.bashrc; . ~/.bashrc; echo ok' 2>&1)" "ok" "silent when sourced twice"
+assert_eq "$(wc -l <"$fx/etc-count" | tr -d ' ')" "3" "/etc/bashrc sourced once per shell, not once per ~/.bashrc"
+p="$(DF_ETC_BASHRC="$fx/etc-bashrc" bash -c '. ~/.bashrc; echo "$PATH"')"
+case "$p" in
+  /opt/system-first:*:"$HOME/.local/bin" | /opt/system-first:*:"$HOME/.local/bin":*) ;;
+  *) _fail "system PATH first, ours last after /etc/bashrc: $p" ;;
+esac
+assert_eq "$(DF_ETC_BASHRC="$fx/missing" bash -c '. ~/.bashrc; echo ok' 2>&1)" "ok" "a missing /etc/bashrc is no error"
+rm -rf "$fx"
+# A variable exported from /etc/profile.d reaches `ssh host cmd` (the image has
+# /etc/profile.d/zz-dotfiles-test.sh). Hosts without /etc/bashrc (Debian family)
+# do not get it, which is how their stock setup behaves too.
+if [ -r /etc/bashrc ]; then
+  assert_eq "$(bash -c '. ~/.bashrc; echo "${DF_TEST_PROFILED:-unset}"' 2>&1)" "from-profile-d" "ssh-like bash gets /etc/profile.d (RHEL family)"
+  assert_eq "$(env -i HOME="$HOME" PATH=/usr/bin:/bin bash -c '. ~/.bashrc; echo "${DF_TEST_PROFILED:-unset}"' 2>&1)" "from-profile-d" "also from a bare environment"
+  assert_eq "$(bash -c '. ~/.bashrc; echo ok' 2>&1)" "ok" "and stays byte-silent"
+  assert_eq "$(bash -lc 'echo "${DF_TEST_PROFILED:-unset}"' 2>&1)" "from-profile-d" "login shells get it from /etc/profile"
+else
+  assert_eq "$(bash -c '. ~/.bashrc; echo "${DF_TEST_PROFILED:-unset}"' 2>&1)" "unset" "no /etc/bashrc, no profile.d in ssh-like bash"
+fi
+[ "$DF_ROW" != r9 ] || assert_ok "the Rocky row has /etc/bashrc, so the check above ran" -- test -r /etc/bashrc
+
+# case_bashrc_d_and_completion: interactive non-login bash loads ~/.bashrc.d/*.sh
+# and bash completion (what the skeleton ~/.bashrc used to do), not twice and
+# not in a non-interactive shell.
+fx="$(mktemp -d)"
+mkdir -p "$HOME/.bashrc.d"
+printf 'DF_RCD_PROBE=yes\n' >"$HOME/.bashrc.d/probe.sh"
+printf 'DF_RCD_IGNORED=yes\n' >"$HOME/.bashrc.d/ignored.txt"
+printf 'BASH_COMPLETION_VERSINFO=(2 11)\necho x >>"%s/comp-count"\n' "$fx" >"$fx/bash_completion"
+interactive_probe() { printf '%s\nexit\n' "$1" | env "${@:2}" bash -i 2>/dev/null; }
+assert_eq "$(interactive_probe 'echo "${DF_RCD_PROBE:-unset}:${DF_RCD_IGNORED:-unset}"')" "yes:unset" "files of .bashrc.d ending in .sh are sourced, others are not"
+assert_eq "$(bash -c '. ~/.bashrc; echo "${DF_RCD_PROBE:-unset}"' 2>&1)" "unset" "not in a non-interactive shell"
+assert_eq "$(interactive_probe 'echo "${BASH_COMPLETION_VERSINFO:-unset}"' DF_BASH_COMPLETION="$fx/bash_completion" | tr -d ' ')" "2" "bash completion is loaded by an interactive non-login bash"
+printf '. ~/.bashrc\nexit\n' | DF_BASH_COMPLETION="$fx/bash_completion" bash -i >/dev/null 2>&1
+assert_eq "$(wc -l <"$fx/comp-count" | tr -d ' ')" "2" "an already loaded completion is not sourced again"
+: >"$fx/comp-count"
+printf 'exit\n' | DF_BASH_COMPLETION="$fx/bash_completion" bash -il >/dev/null 2>&1
+assert_eq "$(wc -l <"$fx/comp-count" | tr -d ' ')" "0" "a login shell leaves it to /etc/profile.d"
+assert_eq "$(DF_BASH_COMPLETION="$fx/bash_completion" bash -c '. ~/.bashrc; echo ok' 2>&1)" "ok" "silent non-interactively"
+assert_eq "$(wc -l <"$fx/comp-count" | tr -d ' ')" "0" "completion is not loaded non-interactively"
+rm -rf "$HOME/.bashrc.d" "$fx"
+
+# case_home_bin_on_path: ~/bin joins PATH like ~/.local/bin, only when it exists
+fx="$(mktemp -d)"
+mkdir -p "$fx/.config/dotfiles" "$fx/bin" "$fx/.local/bin"
+run_env_in() { env -i HOME="$fx" PATH=/usr/bin:/bin DOTFILES_DIR=/src "$@"; }
+assert_eq "$(run_env_in sh -c '. /src/shell/env.sh; echo "$PATH"')" "/usr/bin:/bin:$fx/bin:$fx/.local/bin" "a home bin directory is appended for non-interactive shells"
+assert_eq "$(run_env_in sh -ic '. /src/shell/env.sh; echo "$PATH"' 2>/dev/null)" "$fx/.local/bin:$fx/bin:/usr/bin:/bin" "and goes to the front, behind ~/.local/bin, for interactive ones"
+assert_eq "$(run_env_in sh -c '. /src/shell/env.sh; . /src/shell/env.sh; echo "$PATH"')" "/usr/bin:/bin:$fx/bin:$fx/.local/bin" "no duplicate on a second source"
+rmdir "$fx/bin"
+assert_eq "$(run_env_in sh -c '. /src/shell/env.sh; echo "$PATH"')" "/usr/bin:/bin:$fx/.local/bin" "a missing ~/bin is not added"
+if command -v zsh >/dev/null; then
+  mkdir "$fx/bin"
+  assert_eq "$(run_env_in zsh -c '. /src/shell/env.sh; echo "$PATH"')" "/usr/bin:/bin:$fx/bin:$fx/.local/bin" "zsh gets ~/bin the same way"
+fi
 rm -rf "$fx"
 
 # case_non_default_dotfiles_dir: the recorded location, not ~/.dotfiles, is used

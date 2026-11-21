@@ -24,7 +24,8 @@ RUN set -eu; \
         curl-minimal ca-certificates util-linux procps-ng glibc-langpack-en $extra; \
       dnf clean all; \
     fi; \
-    useradd --create-home --shell /bin/bash tester
+    useradd --create-home --shell /bin/bash tester; \
+    printf 'export DF_TEST_PROFILED=from-profile-d\n' >/etc/profile.d/zz-dotfiles-test.sh
 
 ENV LANG=en_US.UTF-8
 
