@@ -36,6 +36,15 @@ src_of() {
 # same_file <a> <b>: identical bytes (cmp is missing from the Rocky image).
 same_file() { [ "$(sha256sum <"$1")" = "$(sha256sum <"$2")" ]; }
 
+# backup_dirs: timestamped backup directories, oldest first.
+backup_dirs() {
+  local d
+  for d in "$HOME"/.dotfiles-backup/[0-9]*; do
+    [ -d "$d" ] || continue
+    printf '%s\n' "${d##*/}"
+  done | LC_ALL=C sort
+}
+
 assert_linked() { assert_symlink "$HOME/$1" "$dotfiles_dir/$(src_of "$1")"; }
 
 # --- Scenario 0: pre-existing user files (the OS skeleton plus custom ones) ---
@@ -112,6 +121,7 @@ expected_count=${#minimal_dests[@]}
 assert_eq "$(wc -l <"$manifest" | tr -d ' ')" "$expected_count" "manifest lists every link"
 assert_ok "manifest has .bashrc" -- grep -qxF "$HOME/.bashrc" "$manifest"
 assert_ok "installed code is a copy, not /src" -- test -f "$dotfiles_dir/lib/link.sh"
+assert_ok "install is marked as ours" -- test -f "$dotfiles_dir/.dotfiles-managed"
 assert_fail "no .git copied from the source" -- test -e "$dotfiles_dir/.git"
 
 # Pre-existing files went to the backup, original marked.
@@ -156,7 +166,9 @@ assert_pre_install_state
 assert_file_absent "$HOME/.cache/zsh/completions"
 assert_file_absent "$HOME/.config/dotfiles/profile"
 assert_file_absent "$HOME/.config/dotfiles/links"
-assert_ok "backups are kept" -- test -d "$orig"
+assert_file_absent "$orig"
+assert_ok "original marker is retired, not deleted" -- test -L "$(find "$HOME/.dotfiles-backup" -maxdepth 1 -name "original.restored-*" | head -n 1)"
+assert_ok "the backup itself is kept" -- test -f "$HOME/.dotfiles-backup/$(backup_dirs | head -n 1)/.bashrc"
 
 # Uninstalling again is harmless.
 h2="$(home_hash)"
@@ -171,5 +183,108 @@ assert_file_absent "$dotfiles_dir"
 assert_file_absent "$HOME/.config/dotfiles/profile"
 assert_eq "$(cat "$HOME/.bashrc")" "alias mine=1" "custom .bashrc restored after purge"
 assert_pre_install_state
+
+# --- Safety scenarios -----------------------------------------------------------
+# Each one starts from a clean installer state; $HOME dotfiles are back to
+# their original content after the purge above.
+reset_installer_state() {
+  rm -rf "$HOME/.dotfiles" "$HOME/.dotfiles.old" "$HOME/.dotfiles.staging" \
+    "$HOME/.dotfiles-backup" "$HOME/.config/dotfiles"
+}
+backup_cycles() { find "$HOME/.dotfiles-backup" -maxdepth 1 -name 'original.restored-*' | wc -l | tr -d ' '; }
+
+# case_foreign_dotfiles_dir: a ~/.dotfiles the installer did not create is
+# never merged into, linked through, or deleted by uninstall --purge.
+reset_installer_state
+mkdir -p "$HOME/.dotfiles"
+printf 'my own bashrc\n' >"$HOME/.dotfiles/bashrc"
+ln -sfn "$HOME/.dotfiles/bashrc" "$HOME/.bashrc"
+h3="$(home_hash)"
+assert_fail "foreign ~/.dotfiles is refused" -- run_install --profile minimal
+assert_fail "foreign ~/.dotfiles is refused in a dry run" -- run_install --profile minimal --dry-run
+assert_eq "$(home_hash)" "$h3" "refusal changes nothing"
+assert_ok "refusal explains how to move it aside" -- grep -q 'Move it aside' <<<"$(run_install --profile minimal 2>&1 || true)"
+bash "$DOTFILES_SRC/uninstall.sh" --purge
+assert_eq "$(cat "$HOME/.dotfiles/bashrc")" "my own bashrc" "foreign directory survives uninstall --purge"
+assert_symlink "$HOME/.bashrc" "$HOME/.dotfiles/bashrc"
+assert_eq "$(home_hash)" "$h3" "uninstall leaves foreign state alone"
+rm -f "$HOME/.bashrc"
+printf 'alias mine=1\n' >"$HOME/.bashrc"
+
+# A symlinked ~/.dotfiles is somebody's layout as well, even if it points at an empty dir.
+reset_installer_state
+mkdir -p "$HOME/elsewhere"
+ln -s "$HOME/elsewhere" "$HOME/.dotfiles"
+assert_fail "symlinked ~/.dotfiles is refused" -- run_install --profile minimal
+assert_ok "symlink left in place" -- test -L "$HOME/.dotfiles"
+rm -f "$HOME/.dotfiles"
+rmdir "$HOME/elsewhere"
+
+# Running install.sh from a checkout that already is $DOTFILES_DIR is accepted
+# (that is how the checkout gets adopted); purge then removes it.
+reset_installer_state
+cp -r "$DOTFILES_SRC" "$HOME/clone"
+DOTFILES_DIR="$HOME/clone" env -u DOTFILES_SRC bash "$HOME/clone/install.sh" --profile minimal
+assert_symlink "$HOME/.profile" "$HOME/clone/shell/profile"
+assert_ok "adopted checkout is marked" -- test -f "$HOME/clone/.dotfiles-managed"
+DOTFILES_DIR="$HOME/clone" bash "$HOME/clone/uninstall.sh" --purge
+assert_file_absent "$HOME/clone"
+assert_pre_install_state
+reset_installer_state
+
+# case_earliest_backup_wins: a file backed up by a later install (profile
+# upgrade) is restored too.
+mkdir -p "$HOME/.config/mise"
+printf 'mine\n' >"$HOME/.config/mise/config.toml"
+run_install --profile minimal
+run_install --profile server
+bash "$dotfiles_dir/uninstall.sh"
+assert_eq "$(cat "$HOME/.config/mise/config.toml")" "mine" "file backed up by the second install is restored"
+rm -f "$HOME/.config/mise/config.toml"
+reset_installer_state
+
+# case_second_cycle: install, uninstall, edit, install, uninstall restores the
+# edit, not the content from the first cycle.
+printf 'v1\n' >"$HOME/.bashrc"
+run_install --profile minimal
+bash "$dotfiles_dir/uninstall.sh"
+assert_eq "$(cat "$HOME/.bashrc")" "v1" "first cycle restores v1"
+assert_eq "$(backup_cycles)" "1" "first cycle retired its marker"
+printf 'v2\n' >"$HOME/.bashrc"
+run_install --profile minimal
+assert_eq "$(readlink "$HOME/.dotfiles-backup/original" | sed 's|.*/||')" "$(backup_dirs | tail -n 1)" "new cycle starts a new original"
+bash "$dotfiles_dir/uninstall.sh"
+assert_eq "$(cat "$HOME/.bashrc")" "v2" "second cycle restores the edit, not v1"
+assert_eq "$(backup_cycles)" "2" "second cycle retired its marker"
+assert_file_absent "$HOME/.dotfiles-backup/original"
+printf 'alias mine=1\n' >"$HOME/.bashrc"
+reset_installer_state
+
+# case_src_wins_over_self_dir: re-running ~/.dotfiles/install.sh with
+# DOTFILES_SRC re-copies from the source and mirrors it (deleted files go).
+src_root="$DOTFILES_SRC"
+tmpsrc="$(mktemp -d)/src"
+cp -r "$DOTFILES_SRC" "$tmpsrc"
+env DOTFILES_SRC="$tmpsrc" bash "$src_root/install.sh" --profile minimal
+printf '# changed upstream\n' >"$tmpsrc/shell/profile"
+printf 'new\n' >"$tmpsrc/extra-file"
+env DOTFILES_SRC="$tmpsrc" bash "$dotfiles_dir/install.sh"
+assert_eq "$(cat "$dotfiles_dir/shell/profile")" "# changed upstream" "update picked up the edit"
+assert_eq "$(cat "$dotfiles_dir/extra-file")" "new" "update picked up a new file"
+assert_ok "marker survives the update" -- test -f "$dotfiles_dir/.dotfiles-managed"
+assert_linked .profile
+rm -f "$tmpsrc/extra-file"
+env DOTFILES_SRC="$tmpsrc" bash "$dotfiles_dir/install.sh"
+assert_file_absent "$dotfiles_dir/extra-file"
+assert_linked .profile
+assert_file_absent "$HOME/.dotfiles.staging"
+assert_file_absent "$HOME/.dotfiles.old"
+# DOTFILES_SRC pointing at DOTFILES_DIR is a no-op, not a copy onto itself.
+h4="$(home_hash)"
+env DOTFILES_SRC="$dotfiles_dir" bash "$dotfiles_dir/install.sh"
+assert_eq "$(home_hash)" "$h4" "SRC == DIR changes nothing"
+bash "$dotfiles_dir/uninstall.sh" --purge
+assert_file_absent "$dotfiles_dir"
+rm -rf "$tmpsrc" "$HOME/.dotfiles-backup"
 
 rm -rf "$snap"

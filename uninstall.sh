@@ -44,37 +44,52 @@ case "$DOTFILES_DIR" in
 esac
 [ "$DOTFILES_DIR" != "$HOME" ] || die "DOTFILES_DIR must not be \$HOME itself"
 
+
 # _same_content <a> <b>: identical bytes (cmp is not in every minimal image).
 _same_content() {
   [ "$(sha256sum <"$1")" = "$(sha256sum <"$2")" ]
 }
 
-# restore_original: copy everything under ~/.dotfiles-backup/original/ back to
-# its place in $HOME, skipping paths that exist now.
+# restore_original: put back, for every path, the EARLIEST backup of the
+# current cycle: the "original" directory and every later one (a profile
+# upgrade can back up a file after the first install). Paths that exist now
+# are left alone. Afterwards "original" is retired so the next install starts
+# a new cycle instead of restoring stale content.
 restore_original() {
-  local orig file rel dest
-  # "original" is a symlink; resolve it so find and the prefix strip agree.
-  if ! orig="$(cd "$HOME/.dotfiles-backup/original" 2>/dev/null && pwd -P)"; then
+  local root="$HOME/.dotfiles-backup" orig orig_name started=0 dir file rel dest
+  local -A seen=()
+  # "original" is a symlink; resolve it to learn which directory it names.
+  if ! orig="$(cd "$root/original" 2>/dev/null && pwd -P)"; then
     log_info "no original backup to restore"
     return 0
   fi
-  while IFS= read -r -d '' file; do
-    rel="${file#"$orig"/}"
-    dest="$HOME/$rel"
-    if [ -e "$dest" ] || [ -L "$dest" ]; then
-      if [ -L "$dest" ] && [ -L "$file" ] && [ "$(readlink "$dest")" = "$(readlink "$file")" ]; then
-        continue
-      fi
-      if [ ! -L "$dest" ] && [ ! -L "$file" ] && _same_content "$file" "$dest"; then
-        continue
-      fi
-      log_warn "exists, not restoring: $dest"
-      continue
+  orig_name="${orig##*/}"
+  while IFS= read -r -d '' dir; do
+    if [ "$started" = 0 ]; then
+      [ "${dir##*/}" = "$orig_name" ] || continue
+      started=1
     fi
-    mkdir -p "$(dirname "$dest")"
-    cp -a -- "$file" "$dest"
-    log_info "restored $dest"
-  done < <(find "$orig" \( -type f -o -type l \) -print0)
+    while IFS= read -r -d '' file; do
+      rel="${file#"$dir"/}"
+      [ -z "${seen[$rel]:-}" ] || continue
+      seen[$rel]=1
+      dest="$HOME/$rel"
+      if [ -e "$dest" ] || [ -L "$dest" ]; then
+        if [ -L "$dest" ] && [ -L "$file" ] && [ "$(readlink "$dest")" = "$(readlink "$file")" ]; then
+          continue
+        fi
+        if [ ! -L "$dest" ] && [ ! -L "$file" ] && _same_content "$file" "$dest"; then
+          continue
+        fi
+        log_warn "exists, not restoring: $dest"
+        continue
+      fi
+      mkdir -p "$(dirname "$dest")"
+      cp -a -- "$file" "$dest"
+      log_info "restored $dest"
+    done < <(find "$dir" \( -type f -o -type l \) -print0)
+  done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' -print0 | LC_ALL=C sort -z)
+  mv -- "$root/original" "$root/original.restored-$(date +%Y%m%d-%H%M%S)-$$"
 }
 
 df_unlink_all
@@ -85,11 +100,11 @@ rm -f -- "$HOME/.config/dotfiles/profile" "$HOME/.config/dotfiles/links"
 rmdir "$HOME/.config/dotfiles" 2>/dev/null || true
 
 if [ "$purge" = 1 ]; then
-  if [ -f "$DOTFILES_DIR/lib/log.sh" ]; then
+  if df_dir_managed && [ ! -L "$DOTFILES_DIR" ]; then
     rm -rf -- "$DOTFILES_DIR"
     log_info "removed $DOTFILES_DIR"
   else
-    log_warn "$DOTFILES_DIR does not look like a dotfiles checkout, not removing it"
+    log_warn "$DOTFILES_DIR was not created by this installer, not removing it"
   fi
 fi
 

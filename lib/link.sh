@@ -36,15 +36,6 @@ df_profile_valid() { _df_profile_level "$1" >/dev/null; }
 
 _df_manifest() { printf '%s/.config/dotfiles/links' "$HOME"; }
 
-# _df_is_ours <dest>: a symlink that points into $DOTFILES_DIR.
-_df_is_ours() {
-  [ -L "$1" ] || return 1
-  case "$(readlink "$1")" in
-    "${DOTFILES_DIR:?}"/*) return 0 ;;
-  esac
-  return 1
-}
-
 _df_manifest_add() {
   local manifest
   manifest="$(_df_manifest)"
@@ -98,7 +89,7 @@ df_link() {
 # Never touches anything that is not a link into $DOTFILES_DIR.
 df_unlink_one() {
   local dest="$1"
-  if _df_is_ours "$dest"; then
+  if df_is_ours "$dest"; then
     if [ "${DF_DRY_RUN:-0}" = 1 ]; then
       log_info "would unlink $dest"
       return 0
@@ -120,7 +111,7 @@ df_unlink_all() {
   for dest in "${dests[@]}"; do
     [ -n "$dest" ] || continue
     if [ -e "$dest" ] || [ -L "$dest" ]; then
-      _df_is_ours "$dest" || log_warn "not our symlink any more, leaving it: $dest"
+      df_is_ours "$dest" || log_warn "not our symlink any more, leaving it: $dest"
     fi
     df_unlink_one "$dest"
   done

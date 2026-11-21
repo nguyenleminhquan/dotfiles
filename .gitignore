@@ -8,3 +8,4 @@ test/.out/
 docs/design.md
 docs/superpowers/
 tasks/
+.dotfiles-managed

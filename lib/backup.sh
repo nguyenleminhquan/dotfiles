@@ -2,22 +2,50 @@
 # Needs lib/log.sh. Reads HOME and DOTFILES_DIR; DF_DRY_RUN=1 only logs.
 #
 # Layout: ~/.dotfiles-backup/<YYYYmmdd-HHMMSS>/<path relative to $HOME>, plus
-# a symlink ~/.dotfiles-backup/original -> the first backup directory ever
-# made. uninstall.sh restores from "original".
+# a symlink ~/.dotfiles-backup/original -> the first backup directory of the
+# current install cycle. uninstall.sh restores from "original" and every
+# later directory, then retires the marker (original.restored-*) so the next
+# install starts a new cycle. Directory names sort chronologically.
 
 DF_BACKUP_DIR=""
 
+# df_dir_managed: $DOTFILES_DIR carries the marker written by install.sh.
+df_dir_managed() {
+  [ -f "${DOTFILES_DIR:?}/.dotfiles-managed" ]
+}
+
+# df_is_ours <path>: a symlink into $DOTFILES_DIR that this installer made,
+# i.e. the directory is marked as ours (or is gone, leaving a dangling link).
+# Without the marker a link into that path belongs to somebody else.
+df_is_ours() {
+  [ -L "$1" ] || return 1
+  case "$(readlink "$1")" in
+    "${DOTFILES_DIR:?}"/*) ;;
+    *) return 1 ;;
+  esac
+  df_dir_managed || [ ! -e "$1" ]
+}
+
 # df_backup_init: create this run's backup directory (once per process) and,
-# when no backup exists yet, mark it as "original".
+# when this cycle has no "original" yet, mark it as such.
 df_backup_init() {
   [ -z "${DF_BACKUP_DIR:-}" ] || return 0
   [ "${DF_DRY_RUN:-0}" != 1 ] || return 0
 
-  local root="$HOME/.dotfiles-backup" stamp
+  local root="$HOME/.dotfiles-backup" stamp dir n=0
   stamp="$(date +%Y%m%d-%H%M%S)"
-  mkdir -p "$root/$stamp"
-  DF_BACKUP_DIR="$root/$stamp"
-  if [ ! -e "$root/original" ] && [ ! -L "$root/original" ]; then
+  mkdir -p "$root"
+  dir="$stamp"
+  # Two runs within one second must not share a directory: "-N" sorts right
+  # after the plain stamp and before the next second.
+  until mkdir "$root/$dir" 2>/dev/null; do
+    n=$((n + 1))
+    dir="$stamp-$n"
+  done
+  DF_BACKUP_DIR="$root/$dir"
+  # A dangling marker (its directory was deleted) counts as no marker.
+  if [ ! -e "$root/original" ]; then
+    rm -f -- "$root/original"
     ln -s "$DF_BACKUP_DIR" "$root/original"
     log_info "first backup: $DF_BACKUP_DIR (marked as original)"
   fi
@@ -25,16 +53,12 @@ df_backup_init() {
 
 # df_backup_file <dest>: move an existing file, directory or symlink out of
 # the way into the backup directory, keeping its path relative to $HOME.
-# A symlink that already points into $DOTFILES_DIR is ours and is skipped.
+# A symlink that this installer made is skipped.
 df_backup_file() {
-  local dest="$1" rel target n
+  local dest="$1" rel target
 
   [ -e "$dest" ] || [ -L "$dest" ] || return 0
-  if [ -L "$dest" ]; then
-    case "$(readlink "$dest")" in
-      "${DOTFILES_DIR:?}"/*) return 0 ;;
-    esac
-  fi
+  if df_is_ours "$dest"; then return 0; fi
   case "$dest" in
     "$HOME"/*) rel="${dest#"$HOME"/}" ;;
     *) die "refusing to back up a path outside \$HOME: $dest" ;;
@@ -47,13 +71,9 @@ df_backup_file() {
 
   df_backup_init
   target="$DF_BACKUP_DIR/$rel"
-  # Two replacements of the same path within one second must not overwrite
-  # the earlier backup.
-  n=0
-  while [ -e "$target" ] || [ -L "$target" ]; do
-    n=$((n + 1))
-    target="$DF_BACKUP_DIR/$rel.$n"
-  done
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    die "backup path already exists, refusing to overwrite it: $target"
+  fi
   mkdir -p "$(dirname "$target")"
   mv -- "$dest" "$target"
   log_info "backed up $dest"

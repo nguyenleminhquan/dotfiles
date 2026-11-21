@@ -88,39 +88,89 @@ _same_dir() {
   [ "$(cd "$1" && pwd -P)" = "$(cd "$2" && pwd -P)" ]
 }
 
-# fetch_local: copy $DOTFILES_SRC into $DOTFILES_DIR, leaving .git behind.
+# Marker file proving that $DOTFILES_DIR was created by this installer. Every
+# "is this ours?" decision (replace the directory, follow its symlinks, purge
+# it) rests on it, never on the path alone, so a user's own ~/.dotfiles is
+# never adopted, merged into or deleted.
+DF_MARKER=.dotfiles-managed
+
+_write_marker() {
+  printf 'created by dotfiles install.sh; do not delete\n' >"$1/$DF_MARKER"
+}
+
+# _dir_unused: $DOTFILES_DIR does not exist or is an empty real directory.
+_dir_unused() {
+  [ ! -e "$DOTFILES_DIR" ] && [ ! -L "$DOTFILES_DIR" ] && return 0
+  [ -d "$DOTFILES_DIR" ] && [ ! -L "$DOTFILES_DIR" ] && [ -z "$(ls -A "$DOTFILES_DIR")" ]
+}
+
+# check_dir_usable: refuse to touch a $DOTFILES_DIR we did not create.
+check_dir_usable() {
+  if _dir_unused; then return 0; fi
+  if [ -f "$DOTFILES_DIR/$DF_MARKER" ] && [ ! -L "$DOTFILES_DIR" ]; then return 0; fi
+  die "$DOTFILES_DIR already exists and was not created by this installer (it is a non-empty directory, a file or a symlink). Move it aside, for example: mv '$DOTFILES_DIR' '$DOTFILES_DIR.old', or choose another place with DOTFILES_DIR=/some/path"
+}
+
+# _stage: fresh empty staging directory next to $DOTFILES_DIR (same
+# filesystem, so the final swap is a rename). Prints its path.
+_stage() {
+  local staging="$DOTFILES_DIR.staging"
+  rm -rf -- "$staging"
+  mkdir -p "$(dirname "$DOTFILES_DIR")"
+  mkdir "$staging"
+  printf '%s\n' "$staging"
+}
+
+# _swap_in <staging>: replace $DOTFILES_DIR by the staged copy, so the result
+# mirrors the source exactly and nothing deleted upstream lingers.
+_swap_in() {
+  local staging="$1" old="$DOTFILES_DIR.old"
+  _write_marker "$staging"
+  rm -rf -- "$old"
+  if [ -e "$DOTFILES_DIR" ]; then mv -- "$DOTFILES_DIR" "$old"; fi
+  if ! mv -- "$staging" "$DOTFILES_DIR"; then
+    if [ -e "$old" ]; then mv -- "$old" "$DOTFILES_DIR"; fi
+    die "could not move the new copy into $DOTFILES_DIR"
+  fi
+  rm -rf -- "$old"
+}
+
+# fetch_local: mirror $DOTFILES_SRC into $DOTFILES_DIR, leaving .git behind.
 fetch_local() {
-  local src="${DOTFILES_SRC%/}" entry name
+  local src="${DOTFILES_SRC%/}" entry name staging
   [ -f "$src/install.sh" ] && [ -f "$src/lib/log.sh" ] || die "DOTFILES_SRC is not a dotfiles checkout: $src"
   if [ "$dry_run" = 1 ]; then
     log_info "would copy $src to $DOTFILES_DIR"
     return 0
   fi
-  mkdir -p "$DOTFILES_DIR"
+  staging="$(_stage)"
   for entry in "$src"/* "$src"/.[!.]* "$src"/..?*; do
     [ -e "$entry" ] || [ -L "$entry" ] || continue
     name="${entry##*/}"
     [ "$name" != .git ] || continue
-    cp -a -- "$entry" "$DOTFILES_DIR/"
+    [ "$name" != "$DF_MARKER" ] || continue
+    cp -a -- "$entry" "$staging/"
   done
+  _swap_in "$staging"
   log_info "copied $src to $DOTFILES_DIR"
 }
 
-# fetch_tarball: download the GitHub tarball for $DOTFILES_REF into the dir.
+# fetch_tarball: download the GitHub tarball for $DOTFILES_REF and mirror it.
 fetch_tarball() {
-  local repo="${DOTFILES_REPO%.git}" ref="${DOTFILES_REF:-main}"
+  local repo="${DOTFILES_REPO%.git}" ref="${DOTFILES_REF:-main}" staging
   command -v curl >/dev/null 2>&1 || die "neither git nor curl is available; install one or set DOTFILES_SRC"
   command -v tar >/dev/null 2>&1 || die "tar is required to unpack the tarball"
   if [ "$dry_run" = 1 ]; then
     log_info "would download $repo/archive/$ref.tar.gz into $DOTFILES_DIR"
     return 0
   fi
-  mkdir -p "$DOTFILES_DIR"
-  curl -fsSL "$repo/archive/$ref.tar.gz" | tar -xz --strip-components=1 -C "$DOTFILES_DIR"
+  staging="$(_stage)"
+  curl -fsSL "$repo/archive/$ref.tar.gz" | tar -xz --strip-components=1 -C "$staging"
+  _swap_in "$staging"
   log_info "downloaded $repo ($ref) to $DOTFILES_DIR"
 }
 
-# fetch_git: clone, or fast-forward an existing clone.
+# fetch_git: clone into an unused directory, or fast-forward our own clone.
 fetch_git() {
   local ref="${DOTFILES_REF:-main}"
   if [ "$dry_run" = 1 ]; then
@@ -132,20 +182,37 @@ fetch_git() {
     log_info "updated $DOTFILES_DIR ($ref)"
   else
     git clone --quiet --depth 1 --branch "$ref" "$DOTFILES_REPO" "$DOTFILES_DIR"
+    _write_marker "$DOTFILES_DIR"
     log_info "cloned ${DOTFILES_REPO} ($ref) to $DOTFILES_DIR"
   fi
 }
 
 fetch_source() {
-  if [ -n "$self_dir" ] && _same_dir "$self_dir" "$DOTFILES_DIR"; then
+  # "In place": the code to install already is $DOTFILES_DIR, either named
+  # explicitly as the source or because this script is running from it. That
+  # is the one way an existing directory without marker is accepted.
+  local in_place=0
+  if [ -n "${DOTFILES_SRC:-}" ]; then
+    if _same_dir "$DOTFILES_SRC" "$DOTFILES_DIR"; then in_place=1; fi
+  elif [ -n "$self_dir" ] && _same_dir "$self_dir" "$DOTFILES_DIR"; then
+    in_place=1
+  fi
+  if [ "$in_place" = 1 ]; then
+    [ -f "$DOTFILES_DIR/lib/link.sh" ] || die "$DOTFILES_DIR is not a dotfiles checkout"
+    if [ "$dry_run" != 1 ] && [ ! -f "$DOTFILES_DIR/$DF_MARKER" ]; then
+      _write_marker "$DOTFILES_DIR"
+      log_info "using the checkout in $DOTFILES_DIR"
+    fi
     return 0
   fi
+
+  check_dir_usable
   if [ -n "${DOTFILES_SRC:-}" ]; then
     fetch_local
     return 0
   fi
   [ -n "${DOTFILES_REPO:-}" ] || die "no code source: set DOTFILES_SRC (local checkout) or DOTFILES_REPO (GitHub URL)"
-  if command -v git >/dev/null 2>&1 && { [ -d "$DOTFILES_DIR/.git" ] || [ ! -e "$DOTFILES_DIR" ] || [ -z "$(ls -A "$DOTFILES_DIR")" ]; }; then
+  if command -v git >/dev/null 2>&1 && { [ -d "$DOTFILES_DIR/.git" ] || _dir_unused; }; then
     fetch_git
   else
     fetch_tarball
@@ -193,12 +260,16 @@ preflight() {
 # preflight before fetching anything. When piped from curl there is none yet,
 # and preflight has to wait until the code has been downloaded.
 boot_lib=""
-for candidate in "$self_dir" "${DOTFILES_SRC:-}" "$DOTFILES_DIR"; do
+for candidate in "$self_dir" "${DOTFILES_SRC:-}"; do
   if [ -n "$candidate" ] && [ -f "$candidate/lib/link.sh" ]; then
     boot_lib="$candidate"
     break
   fi
 done
+# An installed copy is only trusted when this installer created it.
+if [ -z "$boot_lib" ] && [ -f "$DOTFILES_DIR/$DF_MARKER" ] && [ -f "$DOTFILES_DIR/lib/link.sh" ]; then
+  boot_lib="$DOTFILES_DIR"
+fi
 if [ -n "$boot_lib" ]; then
   load_libs "$boot_lib"
   preflight
