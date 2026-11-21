@@ -3,7 +3,7 @@
 #
 #   dotfiles update [install.sh options]   fetch the latest code and re-run install.sh
 #   dotfiles doctor                        check the install (exit 1 on any FAIL)
-#   dotfiles uninstall [--purge]           run uninstall.sh
+#   dotfiles uninstall [--purge [--force]] run uninstall.sh
 #   dotfiles profile                       print the installed profile
 set -euo pipefail
 
@@ -24,7 +24,9 @@ usage: dotfiles <command>
 commands:
   update [options]      fetch the latest code and re-run install.sh with the saved profile
   doctor                check the install; exit 1 when something FAILs
-  uninstall [--purge]   remove the dotfiles (--purge also removes the tools and the checkout)
+  uninstall [--purge [--force]]
+                        remove the dotfiles; --purge also removes the tools and the checkout
+                        (refused while a git checkout has unsaved work, --force overrides)
   profile               print the installed profile
 EOF
 }
@@ -38,11 +40,11 @@ state_value() {
   printf '%s\n' "$value"
 }
 
-# The install location, as the installer resolves it: the environment, then
-# what it recorded, then ~/.dotfiles.
-DOTFILES_DIR="${DOTFILES_DIR:-$(state_value dir || :)}"
-DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
-export DOTFILES_DIR
+# The install location, resolved like install.sh and uninstall.sh do: the
+# environment, then what the installer recorded, then ~/.dotfiles.
+# shellcheck source=lib/dir.sh
+. "$here/lib/dir.sh"
+df_resolve_dir
 
 # saved_profile: the profile install.sh recorded, or an error.
 saved_profile() {
@@ -51,38 +53,22 @@ saved_profile() {
 
 # update: where the new code comes from, first match wins:
 #   1. $DOTFILES_SRC, a local checkout that install.sh mirrors into $DOTFILES_DIR
-#   2. $DOTFILES_DIR is a git clone: fast-forward it, install in place
-#   3. the repo install.sh recorded (~/.config/dotfiles/repo: URL, then ref):
-#      its tarball is unpacked in a temporary directory under ~/.cache and
-#      installed from there
+#   2. everything else is install.sh's own fetch (install.sh --update): the
+#      git clone in $DOTFILES_DIR is brought to its ref (a branch fast-forwards,
+#      a tag-pinned clone moves to the tag), or the repo recorded in
+#      ~/.config/dotfiles/repo is downloaded as a tarball. One implementation,
+#      so that update and install treat a clone the same way.
 cmd_update() {
-  local profile repo ref
+  local profile
   profile="$(saved_profile)"
   if [ -n "${DOTFILES_SRC:-}" ]; then
     exec bash "${DOTFILES_SRC%/}/install.sh" --profile "$profile" "$@"
   fi
-  if [ -d "$DOTFILES_DIR/.git" ]; then
-    command -v git >/dev/null 2>&1 || die "$DOTFILES_DIR is a git clone but git is not installed"
-    git -C "$DOTFILES_DIR" pull --ff-only || die "git pull --ff-only failed in $DOTFILES_DIR; resolve it there and run update again"
-    exec bash "$DOTFILES_DIR/install.sh" --profile "$profile" "$@"
+  if [ ! -d "$DOTFILES_DIR/.git" ] && [ -z "${DOTFILES_REPO:-}" ] && ! state_value repo >/dev/null; then
+    die "nothing to update from: $DOTFILES_DIR is not a git clone and no repo was recorded; set DOTFILES_SRC to a local checkout, or install with DOTFILES_REPO"
   fi
-  if repo="$(sed -n 1p "$state_dir/repo" 2>/dev/null)" && [ -n "$repo" ]; then
-    ref="$(sed -n 2p "$state_dir/repo")"
-    ref="${ref:-main}"
-    command -v curl >/dev/null 2>&1 || die "curl is required to download the update"
-    command -v tar >/dev/null 2>&1 || die "tar is required to unpack the update"
-    # Under $HOME (nothing is written outside it), and global so that the EXIT
-    # trap still sees it after this function has returned.
-    mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}"
-    update_tmp="$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/dotfiles-update.XXXXXX")"
-    trap 'rm -rf "$update_tmp"' EXIT
-    curl -fsSL "${repo%.git}/archive/$ref.tar.gz" | tar -xz --strip-components=1 -C "$update_tmp" ||
-      die "could not download ${repo%.git} ($ref)"
-    [ -f "$update_tmp/install.sh" ] || die "the download from $repo does not look like dotfiles"
-    DOTFILES_SRC="$update_tmp" bash "$update_tmp/install.sh" --profile "$profile" "$@"
-    return 0
-  fi
-  die "nothing to update from: $DOTFILES_DIR is not a git clone and no repo was recorded; set DOTFILES_SRC to a local checkout, or install with DOTFILES_REPO"
+  [ -f "$DOTFILES_DIR/install.sh" ] || die "install.sh not found in $DOTFILES_DIR"
+  exec bash "$DOTFILES_DIR/install.sh" --update --profile "$profile" "$@"
 }
 
 cmd_doctor() {

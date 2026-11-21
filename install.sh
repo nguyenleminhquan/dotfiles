@@ -1,18 +1,25 @@
 #!/usr/bin/env bash
 # Dotfiles installer (user scope, no sudo).
 #
-#   install.sh [--profile minimal|server|workstation] [--dry-run] [--no-tools]
+#   install.sh [--profile minimal|server|workstation] [--dry-run] [--no-tools] [--update]
 #
 # Where the code comes from (first match wins):
 #   1. DOTFILES_SRC: mirror of a local checkout (works offline); when it is
 #      $DOTFILES_DIR itself nothing is copied
 #   2. this script already lives in $DOTFILES_DIR (and DOTFILES_SRC is unset):
 #      nothing to fetch
-#   3. DOTFILES_REPO + git: clone, or fast-forward an existing clone
+#   3. DOTFILES_REPO + git: clone, or bring an existing clone to the ref
 #   4. DOTFILES_REPO + curl/tar: GitHub tarball, mirrored
 # An existing $DOTFILES_DIR that this installer did not create is refused.
 # DOTFILES_REF picks the branch or tag (default main); DOTFILES_DIR is the
-# install location (default ~/.dotfiles).
+# install location (default: the one an earlier install recorded, else
+# ~/.dotfiles). Piped from curl, DOTFILES_REPO defaults to DOTFILES_DEFAULT_REPO.
+#
+# --update is what `dotfiles update` runs: fetch the newest code even though
+# this script lives in $DOTFILES_DIR (from DOTFILES_REPO, else the repo and ref
+# recorded in ~/.config/dotfiles/repo, else the clone's own origin and branch),
+# then run the new install.sh from there. This is the one implementation of the
+# git and tarball fetch.
 #
 # The profile defaults to the one saved in ~/.config/dotfiles/profile, then to
 # "workstation" under WSL; on any other host --profile is mandatory.
@@ -22,7 +29,15 @@
 # minimal never downloads anything; it removes what a higher profile installed
 # earlier, also with --no-tools. --no-tools (or DOTFILES_NO_TOOLS=1) links the
 # files and skips the downloads.
+#
+# The last step is `dotfiles doctor`; when it reports a FAIL the installer exits
+# non-zero (after everything else is done). A dry run skips it.
 set -euo pipefail
+
+# The repository a piped install (curl ... | bash) fetches when DOTFILES_REPO is
+# not set. TODO: fill in the GitHub URL of this repository, for example
+# https://github.com/<owner>/<repo>, before the first public release.
+DOTFILES_DEFAULT_REPO=""
 
 # Minimal logging for the fetch phase, before lib/log.sh exists (it may not
 # have been downloaded yet). Same format; lib/log.sh replaces these once sourced.
@@ -36,13 +51,15 @@ die() {
 
 usage() {
   cat >&2 <<'EOF'
-usage: install.sh [--profile minimal|server|workstation] [--dry-run] [--no-tools]
+usage: install.sh [--profile minimal|server|workstation] [--dry-run] [--no-tools] [--update]
+
+  --update   fetch the newest code first (what `dotfiles update` runs)
 
 environment:
   DOTFILES_SRC   local checkout to copy from (no network)
   DOTFILES_REPO  GitHub repo URL to clone or download
   DOTFILES_REF   branch or tag (default: main)
-  DOTFILES_DIR   install location (default: ~/.dotfiles)
+  DOTFILES_DIR   install location (default: the recorded one, else ~/.dotfiles)
   DOTFILES_NO_TOOLS=1  same as --no-tools
 EOF
 }
@@ -50,12 +67,17 @@ EOF
 profile=""
 dry_run=0
 no_tools=0
+update=0
+# The arguments again for the re-exec of an update, minus --update.
+reexec_args=()
 [ -z "${DOTFILES_NO_TOOLS:-}" ] || no_tools=1
 while [ $# -gt 0 ]; do
+  [ "$1" = --update ] || reexec_args+=("$1")
   case "$1" in
     --profile)
       [ $# -ge 2 ] || die "--profile needs a value"
       profile="$2"
+      reexec_args+=("$2")
       shift 2
       ;;
     --profile=*)
@@ -70,6 +92,10 @@ while [ $# -gt 0 ]; do
       no_tools=1
       shift
       ;;
+    --update)
+      update=1
+      shift
+      ;;
     -h | --help)
       usage
       exit 0
@@ -81,22 +107,34 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "${HOME:-}" ] && [ -d "$HOME" ] || die "HOME is not set to an existing directory"
-
-DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
-DOTFILES_DIR="${DOTFILES_DIR%/}"
-case "$DOTFILES_DIR" in
-  /?*) ;;
-  *) die "DOTFILES_DIR must be an absolute path other than /: '$DOTFILES_DIR'" ;;
-esac
-[ "$DOTFILES_DIR" != "$HOME" ] || die "DOTFILES_DIR must not be \$HOME itself"
-DF_DRY_RUN="$dry_run"
-
 # Directory this script lives in; empty when it is piped into bash.
 self_dir=""
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
   self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 fi
+
+# The install location: DOTFILES_DIR, then the one recorded by an earlier
+# install, then ~/.dotfiles (lib/dir.sh, shared with uninstall.sh and
+# bin/dotfiles). Piped from curl there is no lib yet: the same steps inline.
+if [ -n "$self_dir" ] && [ -f "$self_dir/lib/dir.sh" ]; then
+  # shellcheck source=lib/dir.sh
+  . "$self_dir/lib/dir.sh"
+  df_resolve_dir
+else
+  [ -n "${HOME:-}" ] && [ -d "$HOME" ] || die "HOME is not set to an existing directory"
+  if [ -z "${DOTFILES_DIR:-}" ] && [ -r "$HOME/.config/dotfiles/dir" ]; then
+    read -r DOTFILES_DIR <"$HOME/.config/dotfiles/dir" || :
+  fi
+  DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+  DOTFILES_DIR="${DOTFILES_DIR%/}"
+  case "$DOTFILES_DIR" in
+    /?*) ;;
+    *) die "DOTFILES_DIR must be an absolute path other than /: '$DOTFILES_DIR'" ;;
+  esac
+  [ "$DOTFILES_DIR" != "$HOME" ] || die "DOTFILES_DIR must not be \$HOME itself"
+  export DOTFILES_DIR
+fi
+DF_DRY_RUN="$dry_run"
 
 # _same_dir <a> <b>: both exist and resolve to the same directory.
 _same_dir() {
@@ -206,21 +244,44 @@ fetch_tarball() {
     return 0
   fi
   _stage
-  curl -fsSL "$repo/archive/$ref.tar.gz" | tar -xz --strip-components=1 -C "$STAGING"
+  curl -fsSL "$repo/archive/$ref.tar.gz" | tar -xz --strip-components=1 -C "$STAGING" ||
+    die "could not download $repo ($ref)"
+  [ -f "$STAGING/install.sh" ] || die "the download from $repo does not look like dotfiles"
   _swap_in
   log_info "downloaded $repo ($ref) to $DOTFILES_DIR"
   fetched_repo=1
 }
 
-# fetch_git: clone into an unused directory, or fast-forward our own clone.
+# update_clone <ref>: bring an existing clone to <ref> (a branch or a tag). A
+# clone on a branch fast-forwards, never merges or rewrites; a detached one (a
+# tag-pinned install) moves to what the ref points at now.
+update_clone() {
+  local ref="$1"
+  git -C "$DOTFILES_DIR" fetch --quiet --force origin "$ref" || die "could not fetch $ref from origin in $DOTFILES_DIR"
+  if git -C "$DOTFILES_DIR" symbolic-ref --quiet HEAD >/dev/null 2>&1; then
+    git -C "$DOTFILES_DIR" merge --ff-only --quiet FETCH_HEAD ||
+      die "$ref cannot be fast-forwarded in $DOTFILES_DIR; resolve it there and run update again"
+  else
+    git -C "$DOTFILES_DIR" checkout --quiet --detach FETCH_HEAD ||
+      die "could not check out $ref in $DOTFILES_DIR; resolve it there and run update again"
+  fi
+}
+
+# fetch_git: clone into an unused directory, or bring our own clone up to date.
 fetch_git() {
-  local ref="${DOTFILES_REF:-main}"
+  local ref="${DOTFILES_REF:-}"
+  if [ -z "$ref" ] && [ -d "$DOTFILES_DIR/.git" ]; then
+    # Nothing says which ref: stay on the branch the clone is on.
+    ref="$(git -C "$DOTFILES_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+    [ -n "$ref" ] || die "$DOTFILES_DIR is on a detached HEAD and no ref is recorded: set DOTFILES_REF to a branch or tag"
+  fi
+  ref="${ref:-main}"
   if [ "$dry_run" = 1 ]; then
-    log_info "would clone ${DOTFILES_REPO} ($ref) into $DOTFILES_DIR"
+    log_info "would clone or update ${DOTFILES_REPO} ($ref) in $DOTFILES_DIR"
     return 0
   fi
   if [ -d "$DOTFILES_DIR/.git" ]; then
-    git -C "$DOTFILES_DIR" pull --ff-only --quiet origin "$ref"
+    update_clone "$ref"
     log_info "updated $DOTFILES_DIR ($ref)"
     fetched_repo=1
   else
@@ -231,13 +292,33 @@ fetch_git() {
   fi
 }
 
+# resolve_update_repo: for --update without DOTFILES_REPO, the repo (and ref) to
+# fetch from: what the last fetching install recorded in ~/.config/dotfiles/repo
+# (URL, then ref), or else the origin of the clone in $DOTFILES_DIR.
+resolve_update_repo() {
+  local url='' ref=''
+  [ -z "${DOTFILES_REPO:-}" ] || return 0
+  if [ -r "$state_dir/repo" ]; then
+    { IFS= read -r url && IFS= read -r ref; } <"$state_dir/repo" || :
+  fi
+  if [ -z "$url" ] && [ -d "$DOTFILES_DIR/.git" ] && command -v git >/dev/null 2>&1; then
+    url="$(git -C "$DOTFILES_DIR" remote get-url origin 2>/dev/null || true)"
+  fi
+  [ -n "$url" ] || die "nothing to update from: $DOTFILES_DIR is not a git clone and no repo was recorded; set DOTFILES_SRC to a local checkout, or DOTFILES_REPO to a repo URL"
+  DOTFILES_REPO="$url"
+  if [ -z "${DOTFILES_REF:-}" ] && [ -n "$ref" ]; then DOTFILES_REF="$ref"; fi
+}
+
 fetch_source() {
   # "In place": the code to install already is $DOTFILES_DIR, either named
   # explicitly as the source or because this script is running from it. That
-  # is the one way an existing directory without marker is accepted.
+  # is the one way an existing directory without marker is accepted. An update
+  # fetches even then.
   local in_place=0
   if [ -n "${DOTFILES_SRC:-}" ]; then
     if _same_dir "$DOTFILES_SRC" "$DOTFILES_DIR"; then in_place=1; fi
+  elif [ "$update" = 1 ]; then
+    resolve_update_repo
   elif [ -n "$self_dir" ] && _same_dir "$self_dir" "$DOTFILES_DIR"; then
     in_place=1
   fi
@@ -255,8 +336,14 @@ fetch_source() {
     fetch_local
     return 0
   fi
+  # Piped from curl there is no checkout to take the code from.
+  if [ -z "${DOTFILES_REPO:-}" ] && [ -z "$self_dir" ]; then DOTFILES_REPO="$DOTFILES_DEFAULT_REPO"; fi
   [ -n "${DOTFILES_REPO:-}" ] || die "no code source: set DOTFILES_SRC (local checkout) or DOTFILES_REPO (GitHub URL)"
-  if command -v git >/dev/null 2>&1 && { [ -d "$DOTFILES_DIR/.git" ] || _dir_unused; }; then
+  if [ -d "$DOTFILES_DIR/.git" ]; then
+    # A tarball would replace the clone (and its history): never without git.
+    command -v git >/dev/null 2>&1 || die "$DOTFILES_DIR is a git clone but git is not installed"
+    fetch_git
+  elif command -v git >/dev/null 2>&1 && _dir_unused; then
     fetch_git
   else
     fetch_tarball
@@ -325,6 +412,11 @@ fi
 
 fetch_source
 
+if [ "$update" = 1 ] && [ "$dry_run" != 1 ] && [ -z "${DOTFILES_SRC:-}" ]; then
+  # The code on disk is new now; this process still runs the old script.
+  exec bash "$DOTFILES_DIR/install.sh" "${reexec_args[@]}"
+fi
+
 if [ "$dry_run" != 1 ]; then
   # Run from the installed copy, which is what the symlinks will point into.
   load_libs "$DOTFILES_DIR"
@@ -373,4 +465,15 @@ fi
 
 if [ "$dry_run" != 1 ]; then
   log_info "installed profile '$profile'"
+  # The last step: the health check. A FAIL does not undo the install, it only
+  # makes the exit status say so. --no-tools told it the tools are not expected.
+  log_info "running dotfiles doctor"
+  doctor_rc=0
+  (
+    # shellcheck source=lib/doctor.sh
+    . "$DOTFILES_DIR/lib/doctor.sh"
+    if [ "$no_tools" = 1 ]; then export DF_DOCTOR_SKIP_TOOLS=1; fi
+    df_doctor
+  ) || doctor_rc=$?
+  [ "$doctor_rc" = 0 ] || die "installed profile '$profile', but dotfiles doctor reported FAIL (see above); fix it, then run: dotfiles doctor"
 fi

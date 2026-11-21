@@ -97,6 +97,14 @@ for what in 'bash -c' 'bash -lc' 'ssh-like bash' 'PATH order' 'profile'; do
   assert_ok "doctor reports: $what" -- grep -q "^OK .*$what" <<<"$doctor_out"
 done
 
+# The old setup put Homebrew on PATH, sometimes through /etc/environment, which
+# user scope cannot undo: a WARN naming it, never a FAIL.
+assert_ok "no linuxbrew on PATH is an OK line" -- grep -Eq '^OK +PATH: no /home/linuxbrew' <<<"$doctor_out"
+brew_path="$PATH:/home/linuxbrew/.linuxbrew/bin"
+out="$(PATH="$brew_path" df_out "$df" doctor)"
+assert_ok "linuxbrew on PATH is a WARN" -- grep -Eq '^WARN +PATH contains /home/linuxbrew.*/etc/environment' <<<"$out"
+assert_eq "$(PATH="$brew_path" df_rc "$df" doctor)" 0 "and does not fail the doctor"
+
 # A package that is on this row is OK, one that is not is a WARN and never a FAIL.
 for p in git screen curl ssh openssl ping; do
   if command -v "$p" >/dev/null 2>&1; then
@@ -178,6 +186,47 @@ assert_ok "doctor without an install names the profile" -- \
 # The stubs were only for the doctor.
 if [ "${#stubs[@]}" -gt 0 ]; then rm -f "${stubs[@]}"; fi
 
+# The workstation profile checks commands.server and commands.workstation. With
+# the second file gone the check must say so, not quietly look at the first only.
+mkdir -p "$fx/ws-home/.config/dotfiles" "$fx/ws-copy"
+echo workstation >"$fx/ws-home/.config/dotfiles/profile"
+cp -a /src/. "$fx/ws-copy/"
+rm -f "$fx/ws-copy/config/mise/commands.workstation"
+out="$(HOME="$fx/ws-home" DOTFILES_DIR="$fx/ws-copy" df_out "$fx/ws-copy/bin/dotfiles" doctor)"
+assert_ok "a missing commands.workstation is a FAIL" -- grep -Eq '^FAIL +tools: no command list for workstation' <<<"$out"
+assert_eq "$(HOME="$fx/ws-home" DOTFILES_DIR="$fx/ws-copy" df_rc "$fx/ws-copy/bin/dotfiles" doctor)" 1 "and fails the doctor"
+rm -rf "$fx/ws-home" "$fx/ws-copy"
+
+# --- case_install_runs_doctor ---------------------------------------------------------------
+# The installer's last step is the doctor; its output is printed, a FAIL turns
+# the exit status non-zero after everything else is done, a dry run skips it.
+mkdir -p "$fx/ih1" "$fx/ih2" "$fx/ih3" "$fx/ih4"
+out="$(HOME="$fx/ih1" DOTFILES_SRC=/src bash /src/install.sh --profile minimal 2>&1)" || _fail "a healthy install exits 0: $out"
+assert_ok "install prints the doctor's profile line" -- grep -Eq '^OK +profile: minimal' <<<"$out"
+assert_ok "and its session checks" -- grep -Eq '^OK +bash -lc' <<<"$out"
+out="$(HOME="$fx/ih2" DOTFILES_SRC=/src bash /src/install.sh --profile minimal --dry-run 2>&1)"
+assert_eq "$(grep -Ec '^(OK|WARN|FAIL) ' <<<"$out" || true)" 0 "a dry run does not run the doctor"
+mkdir -p "$fx/ih3/.config/dotfiles"
+printf 'echo hi\n' >"$fx/ih3/.config/dotfiles/env.local"
+rc=0
+out="$(HOME="$fx/ih3" DOTFILES_SRC=/src bash /src/install.sh --profile minimal 2>&1)" || rc=$?
+assert_eq "$rc" 1 "a doctor FAIL makes the installer exit 1"
+assert_ok "and the installer says so" -- grep -q 'doctor reported FAIL' <<<"$out"
+assert_ok "the doctor output is there" -- grep -Eq '^FAIL +bash -lc' <<<"$out"
+assert_symlink "$fx/ih3/.bashrc" "$fx/ih3/.dotfiles/shell/bashrc"
+assert_eq "$(cat "$fx/ih3/.config/dotfiles/profile")" minimal "the install itself had completed"
+if [ "$DF_PROFILE" != minimal ]; then
+  # --no-tools: the tools are skipped on purpose, which the doctor must not call a FAIL.
+  rc=0
+  out="$(HOME="$fx/ih4" DOTFILES_SRC=/src bash /src/install.sh --profile "$DF_PROFILE" --no-tools 2>&1)" || rc=$?
+  assert_eq "$rc" 0 "install --no-tools exits 0: $out"
+  assert_ok "the doctor says the tools were not checked" -- grep -Eq '^WARN +tools: not checked' <<<"$out"
+  assert_eq "$(grep -c '^FAIL' <<<"$out" || true)" 0 "and nothing FAILs"
+  # Without --no-tools nothing is installed here, and the doctor does FAIL on the tools.
+  assert_eq "$(HOME="$fx/ih4" df_rc /src/bin/dotfiles doctor)" 1 "a later doctor run does miss the tools"
+fi
+rm -rf "$fx/ih1" "$fx/ih2" "$fx/ih3" "$fx/ih4"
+
 # --- case_update_from_src -----------------------------------------------------------------
 # /src is read-only for this user, so the "edited checkout" is a copy of it.
 work="$fx/work"
@@ -228,6 +277,30 @@ if [ "$git_ok" = 1 ]; then
   "${isoenv[@]}" HOME="$gh" "$gh/.local/bin/dotfiles" update >/dev/null 2>&1 || _fail "dotfiles update from a git clone failed"
   assert_eq "$(cat "$gh/.dotfiles/config/update-probe")" "git-1" "update pulls the new commit"
   assert_eq "$("$gh/.local/bin/dotfiles" profile)" "$DF_PROFILE" "update from git keeps the profile"
+  # A tag-pinned clone is detached: update moves it to where the tag points now.
+  g tag -f v1
+  tg="$fx/tag-git-home"
+  mkdir -p "$tg"
+  "${isoenv[@]}" HOME="$tg" DOTFILES_REPO="file://$origin" DOTFILES_REF=v1 bash /src/install.sh --profile "$DF_PROFILE" >/dev/null 2>&1 ||
+    _fail "install from a tag failed"
+  assert_fail "the tag-pinned clone is on a detached HEAD" -- git -C "$tg/.dotfiles" symbolic-ref -q HEAD
+  assert_eq "$(sed -n 2p "$tg/.config/dotfiles/repo")" v1 "install records the tag as the ref"
+  printf 'git-tag-2\n' >"$origin/config/update-probe"
+  g add -A
+  g commit -q -m "after the tag"
+  "${isoenv[@]}" HOME="$tg" "$tg/.local/bin/dotfiles" update >/dev/null 2>&1 || _fail "dotfiles update of a tag-pinned clone failed"
+  assert_eq "$(cat "$tg/.dotfiles/config/update-probe")" "git-1" "update of a tag-pinned clone stays on the tag while the tag does not move"
+  g tag -f v1
+  "${isoenv[@]}" HOME="$tg" "$tg/.local/bin/dotfiles" update >/dev/null 2>&1 || _fail "dotfiles update after the tag moved failed"
+  assert_eq "$(cat "$tg/.dotfiles/config/update-probe")" "git-tag-2" "update follows the tag when it moves"
+  assert_fail "and the clone stays detached" -- git -C "$tg/.dotfiles" symbolic-ref -q HEAD
+  # An adopted clone with no record: the branch it is on and the origin it has are enough.
+  rm -f "$gh/.config/dotfiles/repo"
+  printf 'git-3\n' >"$origin/config/update-probe"
+  g add -A
+  g commit -q -m "probe 3"
+  "${isoenv[@]}" HOME="$gh" "$gh/.local/bin/dotfiles" update >/dev/null 2>&1 || _fail "dotfiles update without a recorded repo failed"
+  assert_eq "$(cat "$gh/.dotfiles/config/update-probe")" "git-3" "update without a record follows the branch of the clone"
   # A history that cannot fast-forward is reported, not forced.
   g commit -q --amend -m "rewritten"
   assert_eq "$(df_rc "${isoenv[@]}" HOME="$gh" "$gh/.local/bin/dotfiles" update)" 1 "update refuses a history that is not a fast-forward"

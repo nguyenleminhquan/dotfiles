@@ -6,6 +6,8 @@
 # One line per check, "OK", "WARN" or "FAIL" first. FAIL is something that
 # breaks sessions or leaves the profile incomplete; WARN is a missing
 # convenience. df_doctor returns 1 when any line is a FAIL, else 0.
+# DF_DOCTOR_SKIP_TOOLS=1 (set by install.sh --no-tools) means the tools were
+# skipped on purpose: the tool check is then a WARN instead of a FAIL per tool.
 
 _df_doctor_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # One definition of df_ping_group_ok: the one the shell helpers use.
@@ -33,6 +35,7 @@ _df_doctor_tools() {
     workstation) files=(server workstation) ;;
   esac
   for file in ${files[@]+"${files[@]}"}; do
+    [ -r "$dir/commands.$file" ] || return 1
     awk '{ sub(/#.*/, "") } NF { print $1 }' "$dir/commands.$file"
   done
 }
@@ -101,7 +104,16 @@ fi'
 _df_doctor_check_tools() {
   local profile="$1" out kind rest trip_path='' missing=0
   local -a tools=()
-  mapfile -t tools < <(_df_doctor_tools "$profile")
+  if [ "$profile" != minimal ] && [ -n "${DF_DOCTOR_SKIP_TOOLS:-}" ]; then
+    _df_doc_warn "tools: not checked, they were skipped on purpose (--no-tools); run install.sh again without it"
+    return 0
+  fi
+  # A missing command list is a broken checkout, not a profile without tools.
+  mapfile -t tools < <(_df_doctor_tools "$profile" || echo __broken__)
+  if [ "${#tools[@]}" -gt 0 ] && [ "${tools[${#tools[@]} - 1]}" = __broken__ ]; then
+    _df_doc_fail "tools: no command list for $profile in $_df_doctor_root/config/mise (broken checkout)"
+    return 0
+  fi
   if [ "${#tools[@]}" -eq 0 ]; then
     if [ "$profile" = minimal ]; then
       _df_doc_ok "tools: none expected for $profile"
@@ -129,6 +141,36 @@ _df_doctor_check_tools() {
       _df_doc_warn "trip: needs CAP_NET_RAW, run it with sudo or give the real binary the capability: sudo setcap cap_net_raw+ep $trip_path"
     fi
   fi
+}
+
+# _df_doctor_check_mise_config <profile>: our mise config is a conf.d fragment
+# (mise writes into ~/.config/mise/config.toml, which must stay the user's). A
+# link at config.toml that points into the checkout is the old layout.
+_df_doctor_check_mise_config() {
+  local frag="$HOME/.config/mise/conf.d/dotfiles.toml" old="$HOME/.config/mise/config.toml"
+  if [ "$1" != minimal ]; then
+    if [ -e "$frag" ]; then
+      _df_doc_ok "mise config: $frag"
+    else
+      _df_doc_fail "mise config: $frag is missing (run install.sh again)"
+    fi
+  fi
+  if [ -L "$old" ]; then
+    case "$(readlink "$old")" in
+      "$_df_doctor_root"/*) _df_doc_warn "mise config: $old still links into the checkout, so mise writes into the repo; run: dotfiles update" ;;
+    esac
+  fi
+}
+
+# _df_doctor_check_path: the old setup put Homebrew on PATH (sometimes through
+# /etc/environment, which user scope cannot undo).
+_df_doctor_check_path() {
+  case ":$PATH:" in
+    *:/home/linuxbrew*)
+      _df_doc_warn "PATH contains /home/linuxbrew: the old setup may have added it in /etc/environment, which this install cannot undo (as root, remove it there)"
+      ;;
+    *) _df_doc_ok "PATH: no /home/linuxbrew" ;;
+  esac
 }
 
 _df_doctor_check_packages() {
@@ -204,7 +246,11 @@ df_doctor() {
   # shellcheck disable=SC2016
   _df_doctor_path_order "login" -lc 'printf "%s\n" "$PATH"'
 
-  if [ -n "$profile" ]; then _df_doctor_check_tools "$profile"; fi
+  if [ -n "$profile" ]; then
+    _df_doctor_check_tools "$profile"
+    _df_doctor_check_mise_config "$profile"
+  fi
+  _df_doctor_check_path
   _df_doctor_check_packages
   _df_doctor_check_ping
   _df_doctor_check_zsh "${profile:-minimal}"
