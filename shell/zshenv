@@ -12,3 +12,7 @@ if [ -r "$DOTFILES_DIR/shell/env.sh" ]; then
   # shellcheck source=/dev/null
   . "$DOTFILES_DIR/shell/env.sh"
 fi
+# Debian and Ubuntu run a slow compinit from /etc/zsh/zshrc and write
+# ~/.zcompdump; ~/.zshrc does its own cached one.
+# shellcheck disable=SC2034
+skip_global_compinit=1

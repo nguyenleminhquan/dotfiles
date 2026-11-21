@@ -1,1 +1,13 @@
-# Placeholder: filled in by a later task.
+# Minimal GNU screen setup.
+startup_message off
+defutf8 on
+defscrollback 10000
+vbell off
+
+# Status line: host, window list, clock. %H is the host name, so it is clear
+# which machine a screen session belongs to.
+hardstatus alwayslastline
+hardstatus string '%{= kG}[%H]%{= kw} %-w%{= BW}%n %t%{-}%+w %=%{= kG}%c %d-%m'
+
+# Let the terminal's own scrollback work in xterm-like terminals.
+termcapinfo xterm* ti@:te@

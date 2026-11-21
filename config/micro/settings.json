@@ -1,1 +1,8 @@
-{}
+{
+    "clipboard": "terminal",
+    "eofnewline": true,
+    "mkparents": true,
+    "savecursor": true,
+    "tabsize": 2,
+    "tabstospaces": true
+}

@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Minimal for now (the full interactive setup comes later).
+# Interactive zsh. ~/.zshenv (environment, PATH) has already run.
 
 # Stops a bash started from inside zsh from switching back to zsh.
 export DOTFILES_IN_ZSH=1
@@ -9,3 +9,50 @@ export DOTFILES_IN_ZSH=1
 if [[ ${SHELL:t} != zsh && -n ${commands[zsh]:-} ]]; then
   export SHELL="${commands[zsh]}"
 fi
+
+_df_dir="${DOTFILES_DIR:-$HOME/.dotfiles}"
+
+# Aliases, EDITOR/VISUAL and history (sizes, sharing, secret filter) are shared
+# with bash.
+for _df_f in aliases history; do
+  # shellcheck source=/dev/null
+  [[ -r "$_df_dir/shell/$_df_f.sh" ]] && source "$_df_dir/shell/$_df_f.sh"
+done
+
+setopt interactive_comments no_beep
+
+# Completion: the dump is cached under ~/.cache/zsh and `-C` skips the
+# security scan and rebuild, which keeps startup fast.
+mkdir -p "$HOME/.cache/zsh"
+autoload -Uz compinit
+compinit -C -d "$HOME/.cache/zsh/zcompdump"
+zstyle ':completion:*' menu select
+zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'
+
+# Keys: emacs style, a few terminfo keys, and incremental history search.
+bindkey -e
+zmodload -F zsh/terminfo +p:terminfo 2>/dev/null
+[[ -n ${terminfo[khome]:-} ]] && bindkey "${terminfo[khome]}" beginning-of-line
+[[ -n ${terminfo[kend]:-} ]] && bindkey "${terminfo[kend]}" end-of-line
+[[ -n ${terminfo[kdch1]:-} ]] && bindkey "${terminfo[kdch1]}" delete-char
+bindkey '^R' history-incremental-pattern-search-backward
+
+# Suggestions from history, vendored so no download is ever needed.
+# shellcheck disable=SC2034
+ZSH_AUTOSUGGEST_STRATEGY=(history)
+if [[ -r "$_df_dir/vendor/zsh-autosuggestions/zsh-autosuggestions.zsh" ]]; then
+  # shellcheck source=/dev/null
+  source "$_df_dir/vendor/zsh-autosuggestions/zsh-autosuggestions.zsh"
+fi
+
+# Prompt. Later steps use starship here when it is installed and fall back to
+# this one otherwise.
+# shellcheck source=/dev/null
+[[ -r "$_df_dir/shell/prompt-minimal.sh" ]] && source "$_df_dir/shell/prompt-minimal.sh"
+
+unset _df_dir _df_f
+
+# Per-machine overrides, kept out of git.
+# shellcheck source=/dev/null
+[[ -r "$HOME/.zshrc.local" ]] && source "$HOME/.zshrc.local"
+return 0
