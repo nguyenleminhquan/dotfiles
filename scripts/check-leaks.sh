@@ -19,6 +19,7 @@ patterns=(
   "private IPv4 class C|(^|[^0-9.])192\.168\.[0-9]{1,3}\.[0-9]{1,3}([^0-9]|$)"
   "GitHub personal access token|ghp_[A-Za-z0-9]{36}"
   "GitLab personal access token|glpat-[A-Za-z0-9_-]{20}"
+  "GitHub fine-grained token|github_pat_[A-Za-z0-9_]{22,}"
   "AWS access key id|AKIA[0-9A-Z]{16}"
   "private key block|-----BEGIN [A-Z ]*PRIVATE KEY-----"
 )

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Blocks commits that add private IPs, credentials or company-specific strings.
+# Blocks commits that add private IPs, credentials or company-specific strings,
+# and commits made under an identity that matches a leak pattern (the author
+# and committer ident end up in every public commit).
 # Scans the staged content (what will actually be committed), not the working
 # tree. Enable once per clone: git config core.hooksPath .githooks
 set -euo pipefail
@@ -7,20 +9,44 @@ set -euo pipefail
 root="$(git rev-parse --show-toplevel)"
 cd "$root"
 
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+# Without the patterns file only the built-in patterns run, which know nothing
+# about company hostnames or domains: say so on every commit.
+if [ ! -f "$HOME/.config/dotfiles/leak-patterns" ]; then
+  {
+    echo "pre-commit: WARNING: $HOME/.config/dotfiles/leak-patterns does not exist."
+    echo "pre-commit: WARNING: only the built-in leak patterns are checked: company"
+    echo "pre-commit: WARNING: domains and hostnames can still slip into this commit."
+  } >&2
+fi
+
+# The identity this commit will carry, one file per role so that a match names
+# the role. An identity git cannot work out is git's own error to report.
+mkdir "$tmp/ident"
+for role in AUTHOR COMMITTER; do
+  git var "GIT_${role}_IDENT" >"$tmp/ident/GIT_${role}_IDENT" 2>/dev/null || : >"$tmp/ident/GIT_${role}_IDENT"
+done
+if ! (cd "$tmp/ident" && "$root/scripts/check-leaks.sh" GIT_AUTHOR_IDENT GIT_COMMITTER_IDENT); then
+  echo "pre-commit: the author or committer identity matches a leak pattern (see above)." >&2
+  echo "pre-commit: set a public one first, for example: git config user.email <id>+<user>@users.noreply.github.com" >&2
+  exit 1
+fi
+
 files=()
 while IFS= read -r -d '' f; do files+=("$f"); done < <(git diff --cached --name-only -z --diff-filter=ACMR)
 [ "${#files[@]}" -gt 0 ] || exit 0
 
 # Materialise the staged blobs under a temp dir at the same relative paths so
 # the guard reports the real file names with line numbers of the staged text.
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+mkdir "$tmp/tree"
 for f in "${files[@]}"; do
-  mkdir -p "$tmp/$(dirname -- "$f")"
-  git show ":$f" >"$tmp/$f"
+  mkdir -p "$tmp/tree/$(dirname -- "$f")"
+  git show ":$f" >"$tmp/tree/$f"
 done
 
-if ! (cd "$tmp" && "$root/scripts/check-leaks.sh" "${files[@]}"); then
+if ! (cd "$tmp/tree" && "$root/scripts/check-leaks.sh" "${files[@]}"); then
   echo "pre-commit: leak guard failed, fix the matches above before committing" >&2
   exit 1
 fi
