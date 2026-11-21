@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+# Dotfiles installer (user scope, no sudo).
+#
+#   install.sh [--profile minimal|server|workstation] [--dry-run]
+#
+# Where the code comes from (first match wins):
+#   1. this script already lives in $DOTFILES_DIR: nothing to fetch
+#   2. DOTFILES_SRC: copy of a local checkout (works offline)
+#   3. DOTFILES_REPO + git: clone, or fast-forward an existing clone
+#   4. DOTFILES_REPO + curl/tar: GitHub tarball
+# DOTFILES_REF picks the branch or tag (default main); DOTFILES_DIR is the
+# install location (default ~/.dotfiles).
+#
+# The profile defaults to the one saved in ~/.config/dotfiles/profile, then to
+# "workstation" under WSL; on any other host --profile is mandatory.
+set -euo pipefail
+
+# Minimal logging for the fetch phase, before lib/log.sh exists (it may not
+# have been downloaded yet). Same format; lib/log.sh replaces these once sourced.
+log_info() { printf '[info] %s\n' "$*" >&2; }
+log_warn() { printf '[warn] %s\n' "$*" >&2; }
+log_error() { printf '[error] %s\n' "$*" >&2; }
+die() {
+  log_error "$@"
+  exit 1
+}
+
+usage() {
+  cat >&2 <<'EOF'
+usage: install.sh [--profile minimal|server|workstation] [--dry-run]
+
+environment:
+  DOTFILES_SRC   local checkout to copy from (no network)
+  DOTFILES_REPO  GitHub repo URL to clone or download
+  DOTFILES_REF   branch or tag (default: main)
+  DOTFILES_DIR   install location (default: ~/.dotfiles)
+EOF
+}
+
+profile=""
+dry_run=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --profile)
+      [ $# -ge 2 ] || die "--profile needs a value"
+      profile="$2"
+      shift 2
+      ;;
+    --profile=*)
+      profile="${1#--profile=}"
+      shift
+      ;;
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage
+      die "unknown argument: $1"
+      ;;
+  esac
+done
+
+[ -n "${HOME:-}" ] && [ -d "$HOME" ] || die "HOME is not set to an existing directory"
+
+DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+DOTFILES_DIR="${DOTFILES_DIR%/}"
+case "$DOTFILES_DIR" in
+  /?*) ;;
+  *) die "DOTFILES_DIR must be an absolute path other than /: '$DOTFILES_DIR'" ;;
+esac
+[ "$DOTFILES_DIR" != "$HOME" ] || die "DOTFILES_DIR must not be \$HOME itself"
+DF_DRY_RUN="$dry_run"
+
+# Directory this script lives in; empty when it is piped into bash.
+self_dir=""
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+  self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+fi
+
+# _same_dir <a> <b>: both exist and resolve to the same directory.
+_same_dir() {
+  [ -d "$1" ] && [ -d "$2" ] || return 1
+  [ "$(cd "$1" && pwd -P)" = "$(cd "$2" && pwd -P)" ]
+}
+
+# fetch_local: copy $DOTFILES_SRC into $DOTFILES_DIR, leaving .git behind.
+fetch_local() {
+  local src="${DOTFILES_SRC%/}" entry name
+  [ -f "$src/install.sh" ] && [ -f "$src/lib/log.sh" ] || die "DOTFILES_SRC is not a dotfiles checkout: $src"
+  if [ "$dry_run" = 1 ]; then
+    log_info "would copy $src to $DOTFILES_DIR"
+    return 0
+  fi
+  mkdir -p "$DOTFILES_DIR"
+  for entry in "$src"/* "$src"/.[!.]* "$src"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    name="${entry##*/}"
+    [ "$name" != .git ] || continue
+    cp -a -- "$entry" "$DOTFILES_DIR/"
+  done
+  log_info "copied $src to $DOTFILES_DIR"
+}
+
+# fetch_tarball: download the GitHub tarball for $DOTFILES_REF into the dir.
+fetch_tarball() {
+  local repo="${DOTFILES_REPO%.git}" ref="${DOTFILES_REF:-main}"
+  command -v curl >/dev/null 2>&1 || die "neither git nor curl is available; install one or set DOTFILES_SRC"
+  command -v tar >/dev/null 2>&1 || die "tar is required to unpack the tarball"
+  if [ "$dry_run" = 1 ]; then
+    log_info "would download $repo/archive/$ref.tar.gz into $DOTFILES_DIR"
+    return 0
+  fi
+  mkdir -p "$DOTFILES_DIR"
+  curl -fsSL "$repo/archive/$ref.tar.gz" | tar -xz --strip-components=1 -C "$DOTFILES_DIR"
+  log_info "downloaded $repo ($ref) to $DOTFILES_DIR"
+}
+
+# fetch_git: clone, or fast-forward an existing clone.
+fetch_git() {
+  local ref="${DOTFILES_REF:-main}"
+  if [ "$dry_run" = 1 ]; then
+    log_info "would clone ${DOTFILES_REPO} ($ref) into $DOTFILES_DIR"
+    return 0
+  fi
+  if [ -d "$DOTFILES_DIR/.git" ]; then
+    git -C "$DOTFILES_DIR" pull --ff-only --quiet origin "$ref"
+    log_info "updated $DOTFILES_DIR ($ref)"
+  else
+    git clone --quiet --depth 1 --branch "$ref" "$DOTFILES_REPO" "$DOTFILES_DIR"
+    log_info "cloned ${DOTFILES_REPO} ($ref) to $DOTFILES_DIR"
+  fi
+}
+
+fetch_source() {
+  if [ -n "$self_dir" ] && _same_dir "$self_dir" "$DOTFILES_DIR"; then
+    return 0
+  fi
+  if [ -n "${DOTFILES_SRC:-}" ]; then
+    fetch_local
+    return 0
+  fi
+  [ -n "${DOTFILES_REPO:-}" ] || die "no code source: set DOTFILES_SRC (local checkout) or DOTFILES_REPO (GitHub URL)"
+  if command -v git >/dev/null 2>&1 && { [ -d "$DOTFILES_DIR/.git" ] || [ ! -e "$DOTFILES_DIR" ] || [ -z "$(ls -A "$DOTFILES_DIR")" ]; }; then
+    fetch_git
+  else
+    fetch_tarball
+  fi
+}
+
+state_dir="$HOME/.config/dotfiles"
+
+# load_libs <root>: source the libraries found under <root>/lib.
+load_libs() {
+  # Plain printf: log.sh below redefines die, so the linter sees the call as
+  # coming before its definition.
+  if [ ! -f "$1/lib/link.sh" ]; then
+    printf '[error] libraries not found in %s/lib\n' "$1" >&2
+    exit 1
+  fi
+  # shellcheck source=lib/log.sh
+  . "$1/lib/log.sh"
+  # shellcheck source=lib/detect.sh
+  . "$1/lib/detect.sh"
+  # shellcheck source=lib/backup.sh
+  . "$1/lib/backup.sh"
+  # shellcheck source=lib/link.sh
+  . "$1/lib/link.sh"
+}
+
+# preflight: platform check and profile choice. Sets $profile. Runs before
+# anything is written, so a rejected run leaves no trace.
+preflight() {
+  df_detect
+  df_platform_supported || exit 1
+  if [ -z "$profile" ]; then
+    if [ -r "$state_dir/profile" ]; then
+      profile="$(head -n 1 "$state_dir/profile")"
+    elif [ "${DF_WSL:-0}" != 0 ]; then
+      profile=workstation
+    else
+      die "no saved profile and this is not WSL: pass --profile minimal|server|workstation"
+    fi
+  fi
+  df_profile_valid "$profile" || die "unknown profile: '$profile' (minimal|server|workstation)"
+}
+
+# Libraries from any checkout we already have make it possible to run
+# preflight before fetching anything. When piped from curl there is none yet,
+# and preflight has to wait until the code has been downloaded.
+boot_lib=""
+for candidate in "$self_dir" "${DOTFILES_SRC:-}" "$DOTFILES_DIR"; do
+  if [ -n "$candidate" ] && [ -f "$candidate/lib/link.sh" ]; then
+    boot_lib="$candidate"
+    break
+  fi
+done
+if [ -n "$boot_lib" ]; then
+  load_libs "$boot_lib"
+  preflight
+elif [ "$dry_run" = 1 ]; then
+  die "a dry run needs a local checkout: run it from a clone or set DOTFILES_SRC"
+fi
+
+fetch_source
+
+if [ "$dry_run" != 1 ]; then
+  # Run from the installed copy, which is what the symlinks will point into.
+  load_libs "$DOTFILES_DIR"
+  [ -n "$boot_lib" ] || preflight
+fi
+
+if [ "$dry_run" = 1 ]; then
+  # Nothing was copied, so existence checks look at the checkout we booted from.
+  DF_REPO_ROOT="$boot_lib"
+  log_info "dry run: nothing will be changed"
+fi
+log_info "profile: $profile"
+
+df_link_profile "$profile"
+
+if [ "$dry_run" = 1 ]; then
+  log_info "would record profile in $state_dir/profile"
+else
+  mkdir -p "$state_dir"
+  if [ "$(cat "$state_dir/profile" 2>/dev/null || true)" != "$profile" ]; then
+    printf '%s\n' "$profile" >"$state_dir/profile"
+  fi
+  log_info "installed profile '$profile'"
+fi
