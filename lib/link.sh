@@ -14,11 +14,31 @@ DF_LINK_TABLE=(
   "minimal|.zshenv|shell/zshenv"
   "minimal|.zshrc|shell/zshrc"
   "minimal|.screenrc|config/screen/screenrc"
-  "minimal|.config/micro/settings.json|config/micro/settings.json"
   "minimal|.local/bin/dotfiles|bin/dotfiles"
   "server|.config/starship.toml|config/starship.toml"
-  "server|.config/mise/config.toml|config/mise/config.toml"
+  "server|.config/mise/conf.d/dotfiles.toml|config/mise/config.toml"
   "workstation|.config/mise/config.workstation.toml|config/mise/config.workstation.toml"
+)
+
+# mise writes into the files of its global configuration: `mise use -g` and
+# `mise set -g` go to ~/.config/mise/config.toml, which is therefore left to the
+# user (a link into the checkout would make mise write into the repo). Ours is
+# read as a conf.d fragment of the same global configuration; the workstation
+# one is selected by MISE_ENV=workstation, and mise never writes to that file.
+
+# Files that are copied once instead of linked, because tools write into them
+# (micro's `set` rewrites settings.json): <lowest profile>|<dest relative to
+# $HOME>|<src in repo>. An existing file is never overwritten; the copy is
+# recorded like a generated file, so uninstall removes it only while untouched.
+DF_COPY_TABLE=(
+  "minimal|.config/micro/settings.json|config/micro/settings.json"
+)
+
+# Links an earlier version made at paths that are not in the link table any
+# more (dest relative to $HOME). Ours are removed on the next install, and a
+# file of the user's that was backed up when the link replaced it comes back.
+DF_LINK_LEGACY=(
+  ".config/mise/config.toml"
 )
 
 # _df_profile_level <profile>: 0 minimal, 1 server, 2 workstation; 1 if unknown.
@@ -124,6 +144,9 @@ df_link_profile() {
   local profile="$1" row min dest src level
   df_profile_valid "$profile" || die "unknown profile: $profile (minimal|server|workstation)"
   level="$(_df_profile_level "$profile")"
+  for dest in "${DF_LINK_LEGACY[@]}"; do
+    df_link_legacy_remove "$dest"
+  done
   for row in "${DF_LINK_TABLE[@]}"; do
     IFS='|' read -r min dest src <<<"$row"
     if [ "$level" -ge "$(_df_profile_level "$min")" ]; then
@@ -140,6 +163,53 @@ df_link_profile() {
       df_gen_remove "$dest"
     fi
   done
+  for row in "${DF_COPY_TABLE[@]}"; do
+    IFS='|' read -r min dest src <<<"$row"
+    if [ "$level" -ge "$(_df_profile_level "$min")" ]; then
+      df_copy_once "$src" "$dest"
+    else
+      df_gen_remove "$dest"
+    fi
+  done
+}
+
+# df_link_legacy_remove <rel>: if $HOME/<rel> is a link this installer made, remove
+# it (and forget it), then put back the file of the user's that it replaced.
+# Anything else at that path is the user's and stays.
+df_link_legacy_remove() {
+  local dest="$HOME/$1"
+  df_is_ours "$dest" || return 0
+  if [ "${DF_DRY_RUN:-0}" = 1 ]; then
+    log_info "would remove the old link $dest and restore the file it replaced"
+    return 0
+  fi
+  df_unlink_one "$dest"
+  df_backup_restore "$1"
+}
+
+# df_copy_once <src_rel> <dest_rel>: copy the repo file to $HOME/<dest_rel> when
+# nothing is there yet. A link of ours from an older version (it would make the
+# tool write into the repo) is replaced by the copy; a link of the user's is
+# backed up first. Any other existing file is the user's, or ours edited by the
+# tool since, and is never touched.
+df_copy_once() {
+  local src_rel="$1" dest="$HOME/$2" src sha
+  src="${DF_REPO_ROOT:-${DOTFILES_DIR:?}}/$src_rel"
+  [ -f "$src" ] || die "missing in repo: $src_rel (looked in ${DF_REPO_ROOT:-$DOTFILES_DIR})"
+  if [ -L "$dest" ]; then
+    if df_is_ours "$dest"; then df_unlink_one "$dest"; else df_backup_file "$dest"; fi
+  elif [ -e "$dest" ]; then
+    return 0
+  fi
+  if [ "${DF_DRY_RUN:-0}" = 1 ]; then
+    log_info "would copy $src_rel to $dest"
+    return 0
+  fi
+  sha="$(sha256sum <"$src" | cut -d' ' -f1)"
+  mkdir -p "$(dirname "$dest")"
+  cp -- "$src" "$dest"
+  _df_gen_record "$dest" "$sha"
+  log_info "copied $dest"
 }
 
 # Generated files: real files (not links) that the installer writes because
@@ -209,6 +279,8 @@ _df_gen_state() { printf '%s/.config/dotfiles/generated' "$HOME"; }
 _df_gen_record() {
   local state tmp
   state="$(_df_gen_state)"
+  # Already recorded exactly so: leave the file (and the order of its lines) alone.
+  if [ -f "$state" ] && grep -qxF -- "$2  $1" "$state"; then return 0; fi
   mkdir -p "$(dirname "$state")"
   tmp="$state.tmp.$$"
   { [ ! -f "$state" ] || grep -vF -- "  $1" "$state" || true; printf '%s  %s\n' "$2" "$1"; } >"$tmp"

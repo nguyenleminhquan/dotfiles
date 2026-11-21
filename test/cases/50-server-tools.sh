@@ -78,12 +78,32 @@ elf_interp() {
   assert_file_absent "$fx/.cache/zsh/completions"
   assert_file_absent "$fx/.cache/dotfiles/init"
 
-  # Recorded: mise itself and a data directory that did not exist before.
+  # Recorded: mise itself and a data directory that did not exist before. The
+  # user has installed aqua-b since (and has a global config of their own), so
+  # the data directory and the config stay; only the binary goes.
+  mkdir -p "$fx/.config/mise"
+  printf '[tools]\n"aqua:b" = "2.0"\n' >"$fx/.config/mise/config.toml"
   printf 'mise-bin\nmise-data\n' >"$state/tools"
-  df_tools_remove >/dev/null 2>&1
+  out="$(df_tools_remove 2>&1)"
   assert_file_absent "$fx/.local/bin/mise"
-  assert_file_absent "$fx/.local/share/mise"
+  assert_ok "a tool the user installed keeps the data directory" -- test -d "$fx/.local/share/mise/installs/aqua-b/2.0/bin"
+  assert_ok "and the user is told" -- grep -q 'kept the tools you installed' <<<"$out"
+  assert_ok "the user's global mise config is never touched" -- grep -q 'aqua:b' "$fx/.config/mise/config.toml"
   assert_file_absent "$state/tools"
+  # Only our own installs in a directory we created: all of it goes.
+  rm -rf "$fx/.local/share/mise/installs/aqua-b"
+  mkdir -p "$fx/.local/share/mise/installs/aqua-c/3.0/bin" "$fx/.local/state/mise" "$fx/.local/bin"
+  : >"$fx/.local/bin/mise"
+  printf 'mise-bin\nmise-data\n' >"$state/tools"
+  printf 'aqua-c/3.0\n' >"$state/mise-installs"
+  df_tools_remove >/dev/null 2>&1
+  assert_file_absent "$fx/.local/share/mise"
+  assert_file_absent "$fx/.local/state/mise"
+  assert_file_absent "$fx/.local/bin/mise"
+  assert_file_absent "$state/tools"
+  assert_file_absent "$state/mise-installs"
+  assert_ok "the user's global mise config survives that too" -- grep -q 'aqua:b' "$fx/.config/mise/config.toml"
+  rm -rf "$fx/.config/mise"
 
   # Nothing recorded: a no-op that prints nothing.
   mkdir -p "$fx/.local/bin"
@@ -141,6 +161,7 @@ assert_file_absent "$fx/.local/bin/mise"
 assert_file_absent "$fx/.local/share/mise"
 assert_file_absent "$fx/.config/dotfiles/tools"
 assert_file_absent "$fx/.config/mise/config.toml"
+assert_file_absent "$fx/.config/mise/conf.d/dotfiles.toml"
 rm -rf "$fx"
 
 # --- minimal rows: offline, nothing tool-related ---------------------------------
@@ -228,7 +249,9 @@ for entry in "${tool_cmds[@]}"; do
 done
 assert_eq "$(grep -Ec '^"(aqua|github):' "$cfg")" "${#tool_cmds[@]}" "this test covers every tool in the config"
 assert_eq "$(wc -l <"$HOME/.config/dotfiles/mise-installs" | tr -d ' ')" "${#tool_cmds[@]}" "every install is recorded"
-assert_symlink "$HOME/.config/mise/config.toml" "$HOME/.dotfiles/config/mise/config.toml"
+# Our mise config is a conf.d fragment; config.toml stays the user's (mise writes there).
+assert_symlink "$HOME/.config/mise/conf.d/dotfiles.toml" "$HOME/.dotfiles/config/mise/config.toml"
+assert_file_absent "$HOME/.config/mise/config.toml"
 assert_eq "$(bash -lc 'echo ok' 2>&1)" ok "login shell stays silent with tools installed"
 assert_eq "$(bash -c '. ~/.bashrc; echo ok' 2>&1)" ok "ssh-like shell stays silent with tools installed"
 
@@ -338,7 +361,10 @@ assert_ok "zsh startup median ${median}ms < 300ms" -- test "$median" -lt 300
 doctor_out="$("$HOME/.local/bin/dotfiles" doctor 2>&1 || true)"
 echo "$doctor_out" >&2
 assert_ok "doctor reports the tools" -- grep -Eq '^OK +tools: all [0-9]+ found' <<<"$doctor_out"
-assert_eq "$(grep -c '^FAIL +tool' <<<"$doctor_out" || true)" 0 "doctor finds every real tool"
+# grep -E: in a basic regular expression "+" is a literal, which made the old
+# pattern match nothing. The sanity line proves the pattern can see a FAIL.
+assert_eq "$(printf 'FAIL tool: x not found\n' | grep -cE '^FAIL +tool' || true)" 1 "the FAIL pattern matches a FAIL line"
+assert_eq "$(grep -cE '^FAIL +tool' <<<"$doctor_out" || true)" 0 "doctor finds every real tool"
 
 # --- case_purge_removes_what_was_installed ------------------------------------------
 # Running the tools above made state of their own (k9s state, starship cache);
@@ -368,6 +394,9 @@ download_cache = false
 "aqua:junegunn/fzf" = "0.75.0"
 "aqua:kubernetes/kubernetes/kubectl" = "1.37.2"
 TOML
+# The install ends with the doctor, which expects every command of the profile's
+# list: the copy lists the three tools it installs.
+printf 'starship github:starship/starship\nfzf aqua:junegunn/fzf\nkubectl aqua:kubernetes/kubernetes/kubectl\n' >"$small_src/config/mise/commands.server"
 small_install() { DOTFILES_SRC="$small_src" bash "$small_src/install.sh" "$@"; }
 install_small() {
   small_install --profile server >"$log" 2>&1 || { cat "$log" >&2; _fail "small install.sh --profile server failed"; }
@@ -377,6 +406,7 @@ install_small() {
 # starship configuration, nothing of what the installer downloaded or generated.
 assert_downgraded() { # <scenario>
   assert_file_absent "$HOME/.config/mise/config.toml"
+  assert_file_absent "$HOME/.config/mise/conf.d/dotfiles.toml"
   assert_file_absent "$HOME/.config/starship.toml"
   assert_eq "$(bash -lc 'command -v kubectl || echo none')" none "$1: kubectl is gone from PATH"
   assert_eq "$(bash -lc 'command -v starship || echo none')" none "$1: starship is gone from PATH"
@@ -401,6 +431,8 @@ printf 'jq 1.8.2\n' >"$HOME/.tool-versions"
 printf '[tools]\n"aqua:FiloSottile/age" = "1.3.2"\n' >"$HOME/mise.toml"
 mkdir -p "$HOME/.config/mise/conf.d"
 printf '[tools]\n"aqua:mikefarah/yq" = "4.54.3"\n' >"$HOME/.config/mise/conf.d/extra.toml"
+# The user's own global config (what `mise use -g` writes) is not ours either.
+printf '[tools]\n"aqua:BurntSushi/ripgrep" = "15.2.0"\n' >"$HOME/.config/mise/config.toml"
 t0=$(date +%s)
 MISE_SYSTEM_CONFIG_DIR="$sys_cfg" install_small
 printf 'small server install took %ss\n' "$(( $(date +%s) - t0 ))" >&2
@@ -408,7 +440,8 @@ assert_ok "kubectl is installed from our config" -- bash -lc 'command -v kubectl
 assert_eq "$(find "$HOME/.local/share/mise/installs" -mindepth 1 -maxdepth 1 ! -name '.*' -printf '%f\n' | LC_ALL=C sort | tr '\n' ' ')" \
   "aqua-junegunn-fzf aqua-kubernetes-kubernetes-kubectl github-starship-starship " "only our three tools are installed"
 assert_eq "$(wc -l <"$HOME/.config/dotfiles/mise-installs" | tr -d ' ')" 3 "only our three installs are recorded"
-assert_fail "no foreign tool is recorded" -- grep -Eq 'jq|age/|yq' "$HOME/.config/dotfiles/mise-installs"
+assert_fail "no foreign tool is recorded" -- grep -Eq 'jq|age/|yq|ripgrep' "$HOME/.config/dotfiles/mise-installs"
+assert_eq "$(cat "$HOME/.config/mise/config.toml")" "$(printf '[tools]\n"aqua:BurntSushi/ripgrep" = "15.2.0"')" "the user's global config is unchanged by the install"
 
 # --- case_profile_downgrade_to_minimal, with --no-tools -------------------------------
 # A prod host that got "server" by mistake: going back to minimal must leave no
@@ -426,3 +459,35 @@ install_small
 assert_ok "kubectl is there before the downgrade" -- bash -lc 'command -v kubectl'
 small_install --profile minimal >/dev/null 2>&1
 assert_downgraded "plain downgrade"
+
+# --- case_mise_use_g_writes_to_the_user_config -------------------------------------------
+# `mise use -g` and `mise set -g` write into ~/.config/mise/config.toml. That
+# file is the user's: the repo file behind conf.d/dotfiles.toml must not change
+# (an update would lose the edit, and a token could end up in a public repo), the
+# tools added that way are not ours to record, and a purge keeps them.
+install_small
+repo_cfg="$HOME/.dotfiles/config/mise/config.toml"
+user_cfg="$HOME/.config/mise/config.toml"
+repo_sum="$(sha256sum <"$repo_cfg")"
+bash -lc 'mise use -g aqua:FiloSottile/age@1.3.1' >"$log" 2>&1 || { cat "$log" >&2; _fail "mise use -g failed"; }
+bash -lc 'mise set -g DF_TEST_TOKEN=not-a-real-token' >"$log" 2>&1 || { cat "$log" >&2; _fail "mise set -g failed"; }
+assert_ok "mise use -g wrote the user's config" -- grep -q 'FiloSottile/age' "$user_cfg"
+assert_ok "mise set -g wrote the user's config" -- grep -q 'DF_TEST_TOKEN' "$user_cfg"
+assert_ok "the user's config is a real file" -- test -f "$user_cfg" -a ! -L "$user_cfg"
+assert_eq "$(sha256sum <"$repo_cfg")" "$repo_sum" "the repo file is untouched by mise use -g and mise set -g"
+assert_ok "our fragment is still a link into the checkout" -- test -L "$HOME/.config/mise/conf.d/dotfiles.toml"
+assert_fail "the tool the user added is not recorded as ours" -- grep -qi 'age' "$HOME/.config/dotfiles/mise-installs"
+age_bin="$(bash -lc 'mise which age')"
+assert_ok "the user's tool runs" -- "$age_bin" --version
+user_sum="$(sha256sum <"$user_cfg")"
+install_small
+assert_eq "$(sha256sum <"$user_cfg")" "$user_sum" "an update leaves the user's config alone"
+assert_fail "and still does not record the user's tool" -- grep -qi 'age' "$HOME/.config/dotfiles/mise-installs"
+assert_ok "our tools are still found" -- bash -lc 'command -v kubectl'
+bash "$HOME/.dotfiles/uninstall.sh" --purge >"$log" 2>&1 || { cat "$log" >&2; _fail "purge failed"; }
+assert_ok "purge keeps the tool the user installed" -- "$age_bin" --version
+assert_ok "purge keeps the user's config" -- grep -q 'FiloSottile/age' "$user_cfg"
+assert_file_absent "$HOME/.config/mise/conf.d/dotfiles.toml"
+assert_file_absent "$HOME/.local/bin/mise"
+assert_eq "$(find "$HOME/.local/share/mise/installs" -mindepth 1 -maxdepth 1 -printf '%f\n' | grep -vci age || true)" 0 "purge removed every install of ours"
+rm -rf "$HOME/.local/share/mise" "$HOME/.local/state/mise" "$HOME/.cache/mise" "$HOME/.cache/sigstore-rust" "$HOME/.config/mise"

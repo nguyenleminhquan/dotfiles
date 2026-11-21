@@ -10,6 +10,8 @@
 #                    zsh-bin (we installed zsh-bin)
 #   mise-installs    "<tool dir>/<version>" under ~/.local/share/mise/installs
 #   zsh-bin-files    every path the zsh-bin installer created, relative to $HOME
+# What mise installs for the user afterwards (`mise use -g`, `mise install`) is
+# never recorded: only the installs of our own isolated run are.
 
 # Pins. Bump deliberately: the checksums below are checked against the release.
 MISE_VERSION=2026.11.12
@@ -42,6 +44,17 @@ _df_tools_unmark() {
   tmp="$file.tmp.$$"
   grep -vxF -- "$1" "$file" >"$tmp" || true
   if [ -s "$tmp" ]; then mv -- "$tmp" "$file"; else rm -f -- "$tmp" "$file"; fi
+}
+
+# _df_mktemp_dir: a fresh private directory under the user's cache (nothing is
+# written outside $HOME, and a host may have a full or read-only /tmp); prints
+# its path, fails when there is none.
+_df_mktemp_dir() {
+  local base="${XDG_CACHE_HOME:-$HOME/.cache}" d
+  mkdir -p "$base" || return 1
+  d="$(mktemp -d "$base/dotfiles.XXXXXX")" || return 1
+  [ -d "$d" ] || return 1
+  printf '%s\n' "$d"
 }
 
 # _df_download <url> <dest>
@@ -124,7 +137,10 @@ df_install_zsh_bin() {
     return 1
   }
   state="$(_df_tools_dir)"
-  tmp="$(mktemp -d)"
+  tmp="$(_df_mktemp_dir)" || {
+    log_error "cannot create a temporary directory under ${XDG_CACHE_HOME:-$HOME/.cache}"
+    return 1
+  }
   _df_download "https://raw.githubusercontent.com/romkatv/zsh-bin/$ZSH_BIN_TAG/install" "$tmp/install" || {
     rm -rf "$tmp"
     return 1
@@ -173,7 +189,10 @@ df_install_mise() {
   log_info "installing mise $MISE_VERSION"
   # No `set -e` in here: the subshell runs under `||`, where it would be ignored.
   (
-    tmp="$(mktemp -d)" || exit 1
+    tmp="$(_df_mktemp_dir)" || {
+      log_error "cannot create a temporary directory under ${XDG_CACHE_HOME:-$HOME/.cache}"
+      exit 1
+    }
     trap 'rm -rf "$tmp"' EXIT
     _df_download "$base/SHASUMS256.txt" "$tmp/SHASUMS256.txt" || exit 1
     want="$(_df_shasums_lookup "$tmp/SHASUMS256.txt" "$asset")" || {
@@ -203,10 +222,12 @@ _df_mise_installs_snapshot() {
 
 # df_mise_install [profile]: `mise install --yes` for the linked config, and
 # for nothing else: whatever else mise would read (~/.tool-versions,
-# ~/mise.toml, /etc/mise, conf.d and config.local.toml next to our config) is
-# not ours to install, and the installs are recorded as ours. That is why mise
-# runs from an empty directory, with a config directory that holds only
-# symlinks to our files, no system config and no look-up above the temp dir.
+# ~/mise.toml, /etc/mise, the user's ~/.config/mise/config.toml and the other
+# fragments in conf.d) is not ours to install, and the installs are recorded as
+# ours. That is why mise runs from an empty directory, with a config directory
+# that holds only symlinks to our files (conf.d/dotfiles.toml, plus
+# config.workstation.toml on the workstation profile), no system config and no
+# look-up above the temp dir.
 # A GITHUB_TOKEN from the environment, or from ~/.config/dotfiles/env.local,
 # reaches mise (it raises the GitHub API limit); it is never stored or printed.
 df_mise_install() {
@@ -215,8 +236,8 @@ df_mise_install() {
     log_error "mise is not installed"
     return 1
   }
-  [ -e "$HOME/.config/mise/config.toml" ] || {
-    log_error "$HOME/.config/mise/config.toml is missing; link the profile first"
+  [ -e "$HOME/.config/mise/conf.d/dotfiles.toml" ] || {
+    log_error "$HOME/.config/mise/conf.d/dotfiles.toml is missing; link the profile first"
     return 1
   }
   if [ -z "$tok" ] && [ -r "$HOME/.config/dotfiles/env.local" ]; then
@@ -225,9 +246,12 @@ df_mise_install() {
   fi
   state="$(_df_tools_dir)"
   if [ ! -e "$data" ] && [ ! -L "$data" ]; then _df_tools_mark mise-data; fi
-  tmp="$(mktemp -d)"
-  mkdir -p "$tmp/cwd" "$tmp/mise-config" "$tmp/mise-system"
-  ln -s "$HOME/.config/mise/config.toml" "$tmp/mise-config/config.toml"
+  tmp="$(_df_mktemp_dir)" || {
+    log_error "cannot create a temporary directory under ${XDG_CACHE_HOME:-$HOME/.cache}"
+    return 1
+  }
+  mkdir -p "$tmp/cwd" "$tmp/mise-config/conf.d" "$tmp/mise-system"
+  ln -s "$HOME/.config/mise/conf.d/dotfiles.toml" "$tmp/mise-config/conf.d/dotfiles.toml"
   f="$HOME/.config/mise/config.workstation.toml"
   if [ "$profile" = workstation ] && [ -e "$f" ]; then ln -s "$f" "$tmp/mise-config/config.workstation.toml"; fi
   _df_mise_installs_snapshot >"$tmp/before"
@@ -277,7 +301,10 @@ _df_tool_real() {
 df_gen_completions() {
   local dir="$HOME/.cache/zsh/completions" tool real out cur changed=0 scratch
   mkdir -p "$dir"
-  scratch="$(mktemp -d)"
+  scratch="$(_df_mktemp_dir)" || {
+    log_error "cannot create a temporary directory under ${XDG_CACHE_HOME:-$HOME/.cache}"
+    return 1
+  }
   for tool in "${DF_COMPLETION_TOOLS[@]}"; do
     if ! real="$(_df_tool_real "$tool")"; then
       if [ -e "$dir/_$tool" ]; then
@@ -350,29 +377,35 @@ _df_tools_remove_zsh_bin() {
 }
 
 # _df_tools_remove_mise: the tools mise installed for us, then mise itself.
+# The versions we recorded always go. The data directory goes with them only
+# when we created it AND nothing else is installed in it: whatever the user
+# installed since (`mise use -g`, `mise install`) is theirs and stays.
 _df_tools_remove_mise() {
-  local list data="$HOME/.local/share/mise" p mise
+  local list data="$HOME/.local/share/mise" p mise own=0 removed=0
   list="$(_df_tools_dir)/mise-installs"
-  if _df_tools_marked mise-data; then
-    # The directory was created by us, so it all goes.
-    # sigstore-rust is the cache of the attestation check mise runs on downloads.
-    rm -rf -- "$data" "$HOME/.cache/mise" "$HOME/.cache/sigstore-rust" "$HOME/.local/state/mise"
-    _df_tools_unmark mise-data
-    rm -f -- "$list"
-    log_info "removed the tools installed by mise"
-  elif [ -f "$list" ]; then
-    # The user had their own mise data: take out only the versions we added.
+  if _df_tools_marked mise-data; then own=1; fi
+  if [ -f "$list" ]; then
+    removed=1
     while IFS= read -r p; do
       case "$p" in '' | /* | *..*) continue ;; esac
       rm -rf -- "${data:?}/installs/$p"
       rmdir -- "$data/installs/${p%/*}" 2>/dev/null || true
     done <"$list"
-    mise="$HOME/.local/bin/mise"
-    [ -x "$mise" ] || mise="$(command -v mise 2>/dev/null || true)"
-    if [ -n "$mise" ]; then "$mise" reshim >/dev/null 2>&1 || true; fi
     rm -f -- "$list"
     log_info "removed the tools installed by mise"
   fi
+  # sigstore-rust is the cache of the attestation check mise runs on downloads.
+  if [ "$own" = 1 ]; then rm -rf -- "$HOME/.cache/mise" "$HOME/.cache/sigstore-rust"; fi
+  if [ "$own" = 1 ] && [ -z "$(_df_mise_installs_snapshot)" ]; then
+    rm -rf -- "$data" "$HOME/.local/state/mise"
+  elif [ -d "$data" ] && { [ "$removed" = 1 ] || [ "$own" = 1 ]; }; then
+    # Rebuild the shims of what is left, while mise itself is still there.
+    mise="$HOME/.local/bin/mise"
+    [ -x "$mise" ] || mise="$(command -v mise 2>/dev/null || true)"
+    if [ -n "$mise" ]; then "$mise" reshim >/dev/null 2>&1 || true; fi
+    if [ "$own" = 1 ]; then log_warn "kept the tools you installed with mise yourself in $data"; fi
+  fi
+  if [ "$own" = 1 ]; then _df_tools_unmark mise-data; fi
   if _df_tools_marked mise-bin; then
     rm -f -- "$HOME/.local/bin/mise"
     _df_tools_unmark mise-bin
@@ -380,9 +413,17 @@ _df_tools_remove_mise() {
   fi
 }
 
+# df_caches_remove: the caches our shell files and installer generate (zsh
+# completions and dump, shell init scripts, the kube prompt cache). The one
+# place that knows them: uninstall.sh and df_tools_remove both call it.
+df_caches_remove() {
+  rm -rf -- "$HOME/.cache/zsh/completions" "$HOME/.cache/dotfiles/init"
+  rm -f -- "$HOME"/.cache/zsh/zcompdump* "$HOME"/.cache/dotfiles/kube-prompt*
+}
+
 # df_tools_remove: undo df_tools_install. Removes only what was recorded as
-# ours, plus the generated completions and init caches. Offline and silent when
-# there is nothing to do, so it is safe to call for every minimal install.
+# ours, plus the generated caches. Offline and silent when there is nothing to
+# do, so it is safe to call for every minimal install.
 df_tools_remove() {
   local state
   state="$(_df_tools_dir)"
@@ -394,10 +435,9 @@ df_tools_remove() {
   fi
   _df_tools_remove_mise
   _df_tools_remove_zsh_bin
-  rm -rf -- "$HOME/.cache/zsh/completions" "$HOME/.cache/dotfiles/init"
-  rm -f -- "$HOME"/.cache/zsh/zcompdump*
+  df_caches_remove
   # Only when empty: the shell may keep its own files in there.
   rmdir "$HOME/.cache/zsh" "$HOME/.cache/dotfiles" 2>/dev/null || true
   # Empty after the config links are gone; a directory with the user's files stays.
-  rmdir "$HOME/.config/mise" 2>/dev/null || true
+  rmdir "$HOME/.config/mise/conf.d" "$HOME/.config/mise" 2>/dev/null || true
 }

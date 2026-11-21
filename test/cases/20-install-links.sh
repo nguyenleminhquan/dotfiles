@@ -11,12 +11,15 @@ dotfiles_dir="$HOME/.dotfiles"
 manifest="$HOME/.config/dotfiles/links"
 
 # Destinations per profile, relative to $HOME (mirrors the symlink table).
-# .config/git/config is not here: it is a generated real file (see the end of this case).
+# .config/git/config is not here: it is a generated real file (see the end of this case),
+# and neither is micro's settings.json: it is copied once (see case_micro_copy).
 minimal_dests=(
   .profile .bash_profile .bashrc .zshenv .zshrc .screenrc
-  .config/micro/settings.json .local/bin/dotfiles
+  .local/bin/dotfiles
 )
-server_extra=(.config/starship.toml .config/mise/config.toml)
+micro_dest=.config/micro/settings.json
+# Our mise config is a conf.d fragment: ~/.config/mise/config.toml is the user's.
+server_extra=(.config/starship.toml .config/mise/conf.d/dotfiles.toml)
 workstation_extra=(.config/mise/config.workstation.toml)
 
 # Source file in the repo for each destination.
@@ -32,7 +35,7 @@ src_of() {
     .config/micro/settings.json) echo config/micro/settings.json ;;
     .local/bin/dotfiles) echo bin/dotfiles ;;
     .config/starship.toml) echo config/starship.toml ;;
-    .config/mise/config.toml) echo config/mise/config.toml ;;
+    .config/mise/conf.d/dotfiles.toml) echo config/mise/config.toml ;;
     .config/mise/config.workstation.toml) echo config/mise/config.workstation.toml ;;
     *) echo "src_of: unknown dest $1" >&2; return 1 ;;
   esac
@@ -64,7 +67,7 @@ printf 'x\n' >"$HOME/.cache/zsh/completions/_stale"
 # Remember every pre-existing dotfile (skeleton files differ per OS) so the
 # restore can be checked for every path the installer may touch.
 snap="$(mktemp -d)"
-tracked=("${minimal_dests[@]}" .config/git/config "${server_extra[@]}" "${workstation_extra[@]}" .bash_logout .gitconfig)
+tracked=("${minimal_dests[@]}" "$micro_dest" .config/git/config "${server_extra[@]}" "${workstation_extra[@]}" .bash_logout .gitconfig .config/mise/config.toml)
 for f in "${tracked[@]}"; do
   if [ -e "$HOME/$f" ] || [ -L "$HOME/$f" ]; then
     mkdir -p "$snap/$(dirname "$f")"
@@ -111,6 +114,10 @@ assert_eq "$(home_hash)" "$h0" "WSL dry run changes nothing"
 # --- case_links_created -----------------------------------------------------
 run_install --profile "$DF_PROFILE"
 for d in "${minimal_dests[@]}"; do assert_linked "$d"; done
+assert_ok "micro settings are a real file, not a link into the repo" -- test -f "$HOME/$micro_dest" -a ! -L "$HOME/$micro_dest"
+assert_ok "with the repo's content" -- same_file "$HOME/$micro_dest" "$dotfiles_dir/config/micro/settings.json"
+assert_fail "micro settings are not in the link manifest" -- grep -qxF "$HOME/$micro_dest" "$HOME/.config/dotfiles/links"
+assert_ok "but their hash is recorded for uninstall" -- grep -qxF "$(sha256sum <"$dotfiles_dir/config/micro/settings.json" | cut -d' ' -f1)  $HOME/$micro_dest" "$HOME/.config/dotfiles/generated"
 case "$DF_PROFILE" in
   minimal)
     for d in "${server_extra[@]}" "${workstation_extra[@]}"; do assert_file_absent "$HOME/$d"; done
@@ -150,6 +157,7 @@ run_install --profile workstation
 for d in "${minimal_dests[@]}" "${server_extra[@]}" "${workstation_extra[@]}"; do assert_linked "$d"; done
 run_install --profile minimal
 for d in "${minimal_dests[@]}"; do assert_linked "$d"; done
+assert_ok "a downgrade keeps the micro settings" -- test -f "$HOME/$micro_dest"
 for d in "${server_extra[@]}" "${workstation_extra[@]}"; do assert_file_absent "$HOME/$d"; done
 assert_eq "$(wc -l <"$manifest" | tr -d ' ')" "${#minimal_dests[@]}" "downgrade shrinks the manifest"
 assert_eq "$(cat "$HOME/.config/dotfiles/profile")" "minimal" "downgrade recorded"
@@ -183,7 +191,12 @@ assert_eq "$(home_hash)" "$h2" "second uninstall changes nothing"
 # --- case_purge: --purge removes the checkout too -----------------------------
 run_install --profile "$DF_PROFILE"
 assert_linked .bashrc
+# What the shell writes while it runs (the kube prompt cache) goes with a purge too.
+mkdir -p "$HOME/.cache/dotfiles"
+printf 'ident\nctx\nns\n' >"$HOME/.cache/dotfiles/kube-prompt"
 bash "$dotfiles_dir/uninstall.sh" --purge
+assert_file_absent "$HOME/.cache/dotfiles/kube-prompt"
+assert_file_absent "$HOME/.cache/dotfiles"
 assert_file_absent "$dotfiles_dir"
 assert_file_absent "$HOME/.config/dotfiles/profile"
 assert_eq "$(cat "$HOME/.bashrc")" "alias mine=1" "custom .bashrc restored after purge"
@@ -237,15 +250,209 @@ assert_file_absent "$HOME/clone"
 assert_pre_install_state
 reset_installer_state
 
+# case_purge_refuses_unsaved_work: --purge deletes the checkout, so a git clone
+# with uncommitted changes or commits that exist nowhere else is refused (before
+# anything is changed) unless --force says otherwise.
+reset_installer_state
+clone="$HOME/clone"
+# shellcheck disable=SC2120  # arguments are passed through assert_ok and assert_fail
+purge() { DOTFILES_DIR="$clone" bash "$clone/uninstall.sh" --purge "$@"; }
+install_clone() { DOTFILES_DIR="$clone" env -u DOTFILES_SRC bash "$clone/install.sh" --profile minimal; }
+if command -v git >/dev/null 2>&1; then
+  g() { git -C "$clone" -c user.name=test -c user.email=test@example.invalid "$@"; }
+  # make_clone [remote]: an adopted checkout that is a git repository; with
+  # "remote" it tracks a bare repository that holds everything so far.
+  make_clone() {
+    rm -rf "$clone" "$HOME/remote"
+    cp -r "$DOTFILES_SRC" "$clone"
+    rm -rf "$clone/.git"
+    git init -q "$clone"
+    g symbolic-ref HEAD refs/heads/main
+    g add -A
+    g commit -q -m initial
+    if [ "${1:-}" = remote ]; then
+      git init -q --bare "$HOME/remote"
+      g remote add origin "$HOME/remote"
+      g push -q -u origin main
+    fi
+    install_clone
+  }
+  make_clone remote
+  assert_ok "the clone is adopted and marked" -- test -f "$clone/.dotfiles-managed"
+  assert_ok "the marker file does not make a clean clone dirty" -- test -z "$(g status --porcelain)"
+  printf 'unsaved\n' >>"$clone/README.md"
+  purge_state="$(home_hash)"
+  assert_fail "a dirty tree is refused" -- purge
+  assert_eq "$(home_hash)" "$purge_state" "a refused purge changes nothing"
+  out="$(purge 2>&1 || true)"
+  assert_ok "the refusal names uncommitted changes" -- grep -q 'uncommitted changes' <<<"$out"
+  assert_ok "and says how to proceed" -- grep -q -- '--force' <<<"$out"
+  assert_ok "the checkout is still there" -- test -f "$clone/README.md"
+  assert_symlink "$HOME/.profile" "$clone/shell/profile"
+  assert_ok "nothing was uninstalled by the refusal" -- test -f "$HOME/.config/dotfiles/links"
+  g commit -q -am "local work"
+  assert_fail "a local commit that is not pushed is refused" -- purge
+  assert_ok "the refusal names the unpushed commit" -- grep -q 'not pushed' <<<"$(purge 2>&1 || true)"
+  g push -q origin main
+  printf 'new\n' >"$clone/untracked.txt"
+  assert_fail "an untracked file counts as unsaved work" -- purge
+  rm -f "$clone/untracked.txt"
+  assert_ok "a clean, pushed clone is purged without --force" -- purge
+  assert_file_absent "$clone"
+  assert_file_absent "$HOME/.config/dotfiles/links"
+  reset_installer_state
+
+  # No upstream at all while commits exist: refused.
+  make_clone
+  assert_fail "a clone without a remote holds commits that exist nowhere else" -- purge
+  assert_ok "the refusal says so" -- grep -q 'no remote' <<<"$(purge 2>&1 || true)"
+  assert_ok "--force overrides the refusal" -- purge --force
+  assert_file_absent "$clone"
+  assert_pre_install_state
+  reset_installer_state
+
+  # A tag-pinned (detached) clone with nothing of its own is fine.
+  make_clone remote
+  g tag v1
+  g push -q origin v1
+  g checkout -q --detach v1
+  assert_ok "a clean detached clone on a pushed tag is purged" -- purge
+  assert_file_absent "$clone"
+  reset_installer_state
+
+  # --force with a dirty tree.
+  make_clone remote
+  printf 'unsaved\n' >>"$clone/README.md"
+  assert_ok "--force purges a dirty clone" -- purge --force
+  assert_file_absent "$clone"
+  assert_file_absent "$HOME/.config/dotfiles/links"
+  assert_pre_install_state
+  rm -rf "$HOME/remote"
+  reset_installer_state
+else
+  # No git on this row: a .git directory cannot be checked, which is a reason to refuse.
+  rm -rf "$clone"
+  cp -r "$DOTFILES_SRC" "$clone"
+  mkdir "$clone/.git"
+  install_clone
+  assert_fail "a .git directory that cannot be checked refuses the purge" -- purge
+  assert_ok "the refusal says why" -- grep -q 'git is not installed' <<<"$(purge 2>&1 || true)"
+  assert_ok "--force overrides it" -- purge --force
+  assert_file_absent "$clone"
+  assert_pre_install_state
+  reset_installer_state
+fi
+
 # case_earliest_backup_wins: a file backed up by a later install (profile
-# upgrade) is restored too.
-mkdir -p "$HOME/.config/mise"
-printf 'mine\n' >"$HOME/.config/mise/config.toml"
+# upgrade) is restored too. starship.toml is what the server profile replaces.
+printf 'mine\n' >"$HOME/.config/starship.toml"
 run_install --profile minimal
 run_install --profile server
+assert_eq "$(cat "$HOME/.dotfiles-backup/$(backup_dirs | tail -n 1)/.config/starship.toml")" "mine" "the second install backed the file up"
 bash "$dotfiles_dir/uninstall.sh"
-assert_eq "$(cat "$HOME/.config/mise/config.toml")" "mine" "file backed up by the second install is restored"
-rm -f "$HOME/.config/mise/config.toml"
+assert_eq "$(cat "$HOME/.config/starship.toml")" "mine" "file backed up by the second install is restored"
+rm -f "$HOME/.config/starship.toml"
+reset_installer_state
+
+# case_user_mise_config_is_left_alone: ~/.config/mise/config.toml is where
+# `mise use -g` writes, so the installer neither links, backs up nor removes it.
+mkdir -p "$HOME/.config/mise"
+printf 'mine\n' >"$HOME/.config/mise/config.toml"
+run_install --profile server
+assert_eq "$(cat "$HOME/.config/mise/config.toml")" "mine" "install leaves the user's mise config in place"
+assert_fail "and does not back it up" -- test -e "$HOME/.dotfiles-backup/original/.config/mise/config.toml"
+printf 'mine, edited by mise use -g\n' >"$HOME/.config/mise/config.toml"
+run_install --profile server
+bash "$dotfiles_dir/uninstall.sh"
+assert_eq "$(cat "$HOME/.config/mise/config.toml")" "mine, edited by mise use -g" "uninstall leaves it alone"
+rm -rf "$HOME/.config/mise"
+reset_installer_state
+
+# case_mise_legacy_link: an install from before the conf.d layout linked
+# ~/.config/mise/config.toml into the checkout and backed the user's own file up.
+# The next install removes that link (via the manifest) and puts the file back.
+legacy_mise="$HOME/.config/mise/config.toml"
+simulate_legacy_mise() { # <user file content, or empty for none>
+  local orig
+  run_install --profile server
+  orig="$(cd "$HOME/.dotfiles-backup/original" && pwd -P)"
+  if [ -n "$1" ]; then
+    mkdir -p "$orig/.config/mise"
+    printf '%s\n' "$1" >"$orig/.config/mise/config.toml"
+  fi
+  rm -f "$legacy_mise"
+  ln -s "$dotfiles_dir/config/mise/config.toml" "$legacy_mise"
+  printf '%s\n' "$legacy_mise" >>"$manifest"
+}
+simulate_legacy_mise 'user tools'
+h7="$(home_hash)"
+out="$(run_install --profile server --dry-run 2>&1)"
+assert_ok "dry run announces the removal of the old link" -- grep -q 'would remove the old link' <<<"$out"
+assert_eq "$(home_hash)" "$h7" "dry run changes nothing"
+repo_sum="$(sha256sum <"$dotfiles_dir/config/mise/config.toml")"
+run_install --profile server
+assert_ok "the old link is gone" -- test -f "$legacy_mise" -a ! -L "$legacy_mise"
+assert_eq "$(cat "$legacy_mise")" "user tools" "the user's file is back"
+assert_eq "$(sha256sum <"$dotfiles_dir/config/mise/config.toml")" "$repo_sum" "the repo file is untouched"
+assert_fail "the old link left the manifest" -- grep -qxF "$legacy_mise" "$manifest"
+assert_linked .config/mise/conf.d/dotfiles.toml
+h8="$(home_hash)"
+run_install --profile server
+assert_eq "$(home_hash)" "$h8" "the next install changes nothing"
+bash "$dotfiles_dir/uninstall.sh"
+assert_eq "$(cat "$legacy_mise")" "user tools" "uninstall leaves the restored file"
+rm -rf "$HOME/.config/mise"
+reset_installer_state
+# no user file was backed up: the link just goes
+simulate_legacy_mise ''
+run_install --profile server
+assert_file_absent "$legacy_mise"
+assert_linked .config/mise/conf.d/dotfiles.toml
+# a legacy path that is the user's own link (not in the manifest) is not touched
+ln -s /etc/hostname "$legacy_mise"
+run_install --profile server
+assert_eq "$(readlink "$legacy_mise")" /etc/hostname "a link that is not ours stays"
+bash "$dotfiles_dir/uninstall.sh"
+rm -rf "$HOME/.config/mise"
+reset_installer_state
+
+# case_micro_copy: settings.json is copied once, because micro's `set` rewrites it.
+micro="$HOME/$micro_dest"
+run_install --profile minimal
+assert_ok "copied, not linked" -- test -f "$micro" -a ! -L "$micro"
+printf '{ "tabsize": 8 }\n' >"$micro"
+repo_sum="$(sha256sum <"$dotfiles_dir/config/micro/settings.json")"
+run_install --profile minimal
+assert_eq "$(cat "$micro")" '{ "tabsize": 8 }' "an edited copy is never overwritten"
+assert_eq "$(sha256sum <"$dotfiles_dir/config/micro/settings.json")" "$repo_sum" "and the repo file is untouched"
+out="$(bash "$dotfiles_dir/uninstall.sh" 2>&1)"
+assert_eq "$(cat "$micro")" '{ "tabsize": 8 }' "uninstall keeps an edited copy"
+assert_ok "and says so" -- grep -qi 'leaving it' <<<"$out"
+rm -rf "$HOME/.config/micro"
+reset_installer_state
+# a file of the user's that is already there is not ours: never replaced, backed up or removed
+mkdir -p "$HOME/.config/micro"
+printf '{ "mine": true }\n' >"$micro"
+run_install --profile minimal
+assert_eq "$(cat "$micro")" '{ "mine": true }' "an existing file is left alone"
+assert_fail "and not backed up" -- test -e "$HOME/.dotfiles-backup/original/$micro_dest"
+bash "$dotfiles_dir/uninstall.sh"
+assert_eq "$(cat "$micro")" '{ "mine": true }' "uninstall leaves it"
+rm -rf "$HOME/.config/micro"
+reset_installer_state
+# a link from an older install is replaced by a copy, never written through
+run_install --profile minimal
+rm -f "$micro"
+ln -s "$dotfiles_dir/config/micro/settings.json" "$micro"
+printf '%s\n' "$micro" >>"$manifest"
+repo_sum="$(sha256sum <"$dotfiles_dir/config/micro/settings.json")"
+run_install --profile minimal
+assert_ok "the old link becomes a copy" -- test -f "$micro" -a ! -L "$micro"
+assert_ok "with the repo's content" -- same_file "$micro" "$dotfiles_dir/config/micro/settings.json"
+assert_fail "the old link left the manifest" -- grep -qxF "$micro" "$manifest"
+bash "$dotfiles_dir/uninstall.sh"
+assert_file_absent "$micro"
+rm -rf "$HOME/.config/micro"
 reset_installer_state
 
 # case_second_cycle: install, uninstall, edit, install, uninstall restores the

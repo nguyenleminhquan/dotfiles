@@ -160,6 +160,9 @@ download_cache = false
 "github:starship/starship" = { version = "1.27.0", asset_pattern = "*x86_64-unknown-linux-musl.tar.gz" }
 "aqua:junegunn/fzf" = "0.75.0"
 TOML
+# The install ends with the doctor, which looks for the commands of every tool
+# the profile lists: the copy lists two server tools, so it expects two.
+printf 'starship github:starship/starship\nfzf aqua:junegunn/fzf\n' >"$src/config/mise/commands.server"
 tree_of() {
   (
     cd "$HOME" || exit 1
@@ -175,7 +178,8 @@ printf 'workstation install took %ss\n' "$(( $(date +%s) - t0 ))" >&2
 
 assert_eq "$(cat "$HOME/.config/dotfiles/profile")" workstation "profile is recorded"
 assert_symlink "$HOME/.config/mise/config.workstation.toml" "$HOME/.dotfiles/config/mise/config.workstation.toml"
-assert_symlink "$HOME/.config/mise/config.toml" "$HOME/.dotfiles/config/mise/config.toml"
+assert_symlink "$HOME/.config/mise/conf.d/dotfiles.toml" "$HOME/.dotfiles/config/mise/config.toml"
+assert_file_absent "$HOME/.config/mise/config.toml"
 assert_eq "$(bash -lc 'echo "$MISE_ENV"')" workstation "login shells select the workstation mise environment"
 ls_out="$(cd "$HOME" && bash -lc 'mise ls --current' 2>&1)"
 echo "$ls_out" >&2

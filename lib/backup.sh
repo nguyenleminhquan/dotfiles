@@ -79,3 +79,27 @@ df_backup_file() {
   mv -- "$dest" "$target"
   log_info "backed up $dest"
 }
+
+# df_backup_restore <rel>: copy $HOME/<rel> back from the earliest backup of the
+# current cycle that holds it ("original" and every later directory, the range
+# uninstall.sh restores from), unless something is at that path now. The backup
+# stays where it is.
+df_backup_restore() {
+  local rel="$1" dest="$HOME/$1" root="$HOME/.dotfiles-backup" orig dir started=0
+  if [ -e "$dest" ] || [ -L "$dest" ]; then return 0; fi
+  orig="$(cd "$root/original" 2>/dev/null && pwd -P)" || return 0
+  orig="${orig##*/}"
+  while IFS= read -r dir; do
+    if [ "$started" = 0 ]; then
+      [ "${dir##*/}" = "$orig" ] || continue
+      started=1
+    fi
+    if [ -e "$dir/$rel" ] || [ -L "$dir/$rel" ]; then
+      mkdir -p "$(dirname "$dest")"
+      cp -a -- "$dir/$rel" "$dest"
+      log_info "restored $dest from the backup"
+      return 0
+    fi
+  done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' | LC_ALL=C sort)
+  return 0
+}
