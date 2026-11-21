@@ -1,1 +1,65 @@
-# Placeholder: filled in by a later task.
+# Starship prompt for the `server` and `workstation` profiles. It mirrors the
+# minimal prompt: user@host cwd [branch] [context/namespace] $
+# Reference: https://starship.rs/config/
+
+add_newline = false
+# Only these modules run, which keeps every prompt cheap. The explicit
+# `disabled = true` entries below stay as a second line of defence in case
+# someone adds $all back.
+format = "$username$hostname$directory$git_branch$git_status$kubernetes$cmd_duration$character"
+# A module that takes longer than this (ms) is skipped for that prompt.
+command_timeout = 500
+
+[username]
+show_always = true
+format = "[$user]($style)"
+
+[hostname]
+ssh_only = false
+format = "[@$hostname]($style) "
+
+[directory]
+truncation_length = 3
+truncate_to_repo = false
+
+[git_branch]
+format = '[\[$branch\]]($style) '
+
+[cmd_duration]
+min_time = 2000
+format = '[took $duration]($style) '
+
+[character]
+success_symbol = '[\$](green)'
+error_symbol = '[\$](bold red)'
+
+# Kubernetes context and namespace, read from the kubeconfig files (no kubectl
+# call). A context whose name contains "prod" is bold red so that it cannot be
+# missed before a destructive command.
+[kubernetes]
+disabled = false
+style = "bold cyan"
+format = '[\[$context(/$namespace)\]]($style) '
+
+# The pattern is "contains prod, any case". Starship wraps it in ^...$, and a
+# plain (?i) flag does not compile in its build (no Unicode case folding), so
+# the case-insensitive part is an ASCII-only group.
+[[kubernetes.contexts]]
+context_pattern = ".*(?i-u:prod).*"
+style = "bold red"
+
+# Slow or unused here.
+[package]
+disabled = true
+
+[nodejs]
+disabled = true
+
+[rust]
+disabled = true
+
+[java]
+disabled = true
+
+[gcloud]
+disabled = true

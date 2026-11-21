@@ -204,6 +204,10 @@ if [[ -n ${ZSH_VERSION:-} ]] && zmodload -F zsh/stat b:zstat 2>/dev/null; then
   _df_have_zstat=1
 fi
 
+# shell/tools.sh sets this when starship draws the prompt: the df_kube_*
+# helpers above stay available, but no prompt of ours is installed.
+[[ -z ${DF_PROMPT_FUNCTIONS_ONLY:-} ]] || return 0
+
 if [[ -n ${ZSH_VERSION:-} ]]; then
   _df_prompt_precmd() {
     local rc=$? seg=''

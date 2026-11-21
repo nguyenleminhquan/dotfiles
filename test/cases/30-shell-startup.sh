@@ -1,5 +1,6 @@
 # Shell startup: silent and PATH-safe for non-interactive sessions, zsh
 # hand-over only for real terminals.
+export DOTFILES_NO_TOOLS=1 # tools are covered by 50-server-tools.sh
 /src/install.sh --profile "$DF_PROFILE" >/dev/null 2>&1
 
 # case_noninteractive_silent_and_path_last

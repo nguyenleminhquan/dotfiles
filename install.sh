@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Dotfiles installer (user scope, no sudo).
 #
-#   install.sh [--profile minimal|server|workstation] [--dry-run]
+#   install.sh [--profile minimal|server|workstation] [--dry-run] [--no-tools]
 #
 # Where the code comes from (first match wins):
 #   1. DOTFILES_SRC: mirror of a local checkout (works offline); when it is
@@ -16,6 +16,11 @@
 #
 # The profile defaults to the one saved in ~/.config/dotfiles/profile, then to
 # "workstation" under WSL; on any other host --profile is mandatory.
+#
+# server and workstation also install zsh-bin (only when the host has no zsh 5.8+),
+# mise and its tools, and generate zsh completions: that needs the network.
+# minimal never downloads anything; it removes what a higher profile installed
+# earlier. --no-tools (or DOTFILES_NO_TOOLS=1) links the files and skips all of it.
 set -euo pipefail
 
 # Minimal logging for the fetch phase, before lib/log.sh exists (it may not
@@ -30,18 +35,21 @@ die() {
 
 usage() {
   cat >&2 <<'EOF'
-usage: install.sh [--profile minimal|server|workstation] [--dry-run]
+usage: install.sh [--profile minimal|server|workstation] [--dry-run] [--no-tools]
 
 environment:
   DOTFILES_SRC   local checkout to copy from (no network)
   DOTFILES_REPO  GitHub repo URL to clone or download
   DOTFILES_REF   branch or tag (default: main)
   DOTFILES_DIR   install location (default: ~/.dotfiles)
+  DOTFILES_NO_TOOLS=1  same as --no-tools
 EOF
 }
 
 profile=""
 dry_run=0
+no_tools=0
+[ -z "${DOTFILES_NO_TOOLS:-}" ] || no_tools=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --profile)
@@ -55,6 +63,10 @@ while [ $# -gt 0 ]; do
       ;;
     --dry-run)
       dry_run=1
+      shift
+      ;;
+    --no-tools)
+      no_tools=1
       shift
       ;;
     -h | --help)
@@ -262,6 +274,8 @@ load_libs() {
   . "$1/lib/backup.sh"
   # shellcheck source=lib/link.sh
   . "$1/lib/link.sh"
+  # shellcheck source=lib/tools.sh
+  . "$1/lib/tools.sh"
 }
 
 # preflight: platform check and profile choice. Sets $profile. Runs before
@@ -330,5 +344,18 @@ else
   if [ "$(cat "$state_dir/dir" 2>/dev/null || true)" != "$DOTFILES_DIR" ]; then
     printf '%s\n' "$DOTFILES_DIR" >"$state_dir/dir"
   fi
+fi
+
+# Tools. server and workstation download them; minimal removes what a higher
+# profile left behind and never touches the network.
+if [ "$no_tools" = 1 ]; then
+  [ "$profile" = minimal ] || log_info "skipping tools (--no-tools)"
+elif [ "$profile" = minimal ]; then
+  df_tools_remove
+else
+  df_tools_install "$profile" || die "tool installation failed; the files are linked, run install.sh again to retry"
+fi
+
+if [ "$dry_run" != 1 ]; then
   log_info "installed profile '$profile'"
 fi

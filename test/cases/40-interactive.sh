@@ -1,6 +1,7 @@
 # Interactive shell: history secret filter, kube-aware prompt, aliases and
 # the app configs (git, micro, screen). Unit-style checks source the repo files
 # from /src; the end-to-end ones use the installed setup on a pty.
+export DOTFILES_NO_TOOLS=1 # tools are covered by 50-server-tools.sh
 /src/install.sh --profile "$DF_PROFILE" >/dev/null 2>&1
 
 has_zsh=0

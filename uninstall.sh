@@ -5,8 +5,11 @@
 #
 # Removes the symlinks listed in ~/.config/dotfiles/links, restores the files
 # saved in ~/.dotfiles-backup/original/ (never overwriting anything that exists
-# now), drops the completion cache and the installer state. --purge also
-# deletes $DOTFILES_DIR itself. The backups are kept either way.
+# now), drops the completion and shell-init caches and the installer state.
+# --purge also removes what install.sh installed (mise, the tools mise
+# installed, zsh-bin; see lib/tools.sh) and $DOTFILES_DIR itself. The backups
+# are kept either way. Without --purge the tools stay, and so does the record
+# of them, so that a later --purge still knows what to remove.
 set -euo pipefail
 
 purge=0
@@ -34,6 +37,8 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 . "$here/lib/backup.sh"
 # shellcheck source=lib/link.sh
 . "$here/lib/link.sh"
+# shellcheck source=lib/tools.sh
+. "$here/lib/tools.sh"
 
 [ -n "${HOME:-}" ] && [ -d "$HOME" ] || die "HOME is not set to an existing directory"
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
@@ -96,11 +101,12 @@ df_unlink_all
 df_gen_all_remove
 restore_original
 
-rm -rf -- "$HOME/.cache/zsh/completions"
+rm -rf -- "$HOME/.cache/zsh/completions" "$HOME/.cache/dotfiles/init"
+rm -f -- "$HOME"/.cache/zsh/zcompdump*
 rm -f -- "$HOME/.config/dotfiles/profile" "$HOME/.config/dotfiles/links" "$HOME/.config/dotfiles/generated" "$HOME/.config/dotfiles/dir"
-rmdir "$HOME/.config/dotfiles" 2>/dev/null || true
 
 if [ "$purge" = 1 ]; then
+  df_tools_remove
   if df_dir_managed && [ ! -L "$DOTFILES_DIR" ]; then
     rm -rf -- "$DOTFILES_DIR"
     log_info "removed $DOTFILES_DIR"
@@ -108,5 +114,7 @@ if [ "$purge" = 1 ]; then
     log_warn "$DOTFILES_DIR was not created by this installer, not removing it"
   fi
 fi
+
+rmdir "$HOME/.config/dotfiles" 2>/dev/null || true
 
 log_info "uninstalled"

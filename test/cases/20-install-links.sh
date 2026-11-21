@@ -2,6 +2,10 @@
 # One container per case file, so the scenarios below run in order and each
 # leaves $HOME in the state the next one expects.
 
+# These scenarios are about links and backups; the server tools are covered by
+# 50-server-tools.sh, so no download happens here.
+export DOTFILES_NO_TOOLS=1
+
 run_install() { bash "$DOTFILES_SRC/install.sh" "$@"; }
 dotfiles_dir="$HOME/.dotfiles"
 manifest="$HOME/.config/dotfiles/links"

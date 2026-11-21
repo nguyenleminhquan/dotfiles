@@ -22,8 +22,12 @@ done
 setopt interactive_comments no_beep
 
 # Completion: the dump is cached under ~/.cache/zsh and `-C` skips the
-# security scan and rebuild, which keeps startup fast.
+# security scan and rebuild, which keeps startup fast. `-C` also means the dump
+# is never refreshed by itself: install.sh deletes it whenever the generated
+# completions in ~/.cache/zsh/completions change.
 mkdir -p "$HOME/.cache/zsh"
+# shellcheck disable=SC2206  # zsh expands the array unquoted
+fpath=("$HOME/.cache/zsh/completions" $fpath)
 autoload -Uz compinit
 compinit -C -d "$HOME/.cache/zsh/zcompdump"
 zstyle ':completion:*' menu select
@@ -45,10 +49,10 @@ if [[ -r "$_df_dir/vendor/zsh-autosuggestions/zsh-autosuggestions.zsh" ]]; then
   source "$_df_dir/vendor/zsh-autosuggestions/zsh-autosuggestions.zsh"
 fi
 
-# Prompt. Later steps use starship here when it is installed and fall back to
-# this one otherwise.
+# mise, starship (or the minimal prompt) and fzf. Last, because fzf defines
+# completions and key bindings that need compinit and the bindings above.
 # shellcheck source=/dev/null
-[[ -r "$_df_dir/shell/prompt-minimal.sh" ]] && source "$_df_dir/shell/prompt-minimal.sh"
+[[ -r "$_df_dir/shell/tools.sh" ]] && source "$_df_dir/shell/tools.sh"
 
 unset _df_dir _df_f
 
