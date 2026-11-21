@@ -4,10 +4,13 @@
 #   install.sh [--profile minimal|server|workstation] [--dry-run]
 #
 # Where the code comes from (first match wins):
-#   1. this script already lives in $DOTFILES_DIR: nothing to fetch
-#   2. DOTFILES_SRC: copy of a local checkout (works offline)
+#   1. DOTFILES_SRC: mirror of a local checkout (works offline); when it is
+#      $DOTFILES_DIR itself nothing is copied
+#   2. this script already lives in $DOTFILES_DIR (and DOTFILES_SRC is unset):
+#      nothing to fetch
 #   3. DOTFILES_REPO + git: clone, or fast-forward an existing clone
-#   4. DOTFILES_REPO + curl/tar: GitHub tarball
+#   4. DOTFILES_REPO + curl/tar: GitHub tarball, mirrored
+# An existing $DOTFILES_DIR that this installer did not create is refused.
 # DOTFILES_REF picks the branch or tag (default main); DOTFILES_DIR is the
 # install location (default ~/.dotfiles).
 #
@@ -103,70 +106,92 @@ _dir_unused() {
   [ ! -e "$DOTFILES_DIR" ] && [ ! -L "$DOTFILES_DIR" ] && return 0
   [ -d "$DOTFILES_DIR" ] && [ ! -L "$DOTFILES_DIR" ] && [ -z "$(ls -A "$DOTFILES_DIR")" ]
 }
-
 # check_dir_usable: refuse to touch a $DOTFILES_DIR we did not create.
 check_dir_usable() {
   if _dir_unused; then return 0; fi
   if [ -f "$DOTFILES_DIR/$DF_MARKER" ] && [ ! -L "$DOTFILES_DIR" ]; then return 0; fi
-  die "$DOTFILES_DIR already exists and was not created by this installer (it is a non-empty directory, a file or a symlink). Move it aside, for example: mv '$DOTFILES_DIR' '$DOTFILES_DIR.old', or choose another place with DOTFILES_DIR=/some/path"
+  die "$DOTFILES_DIR already exists and was not created by this installer (it is a non-empty directory, a file or a symlink). Move it aside, for example: mv '$DOTFILES_DIR' '$DOTFILES_DIR.bak-$(date +%Y%m%d-%H%M%S)', or choose another place with DOTFILES_DIR=/some/path"
 }
 
-# _stage: fresh empty staging directory next to $DOTFILES_DIR (same
-# filesystem, so the final swap is a rename). Prints its path.
+# Temporary directories next to $DOTFILES_DIR get names nobody else owns
+# (pid + random, created atomically with mkdir), and only those are ever
+# deleted. Names a user may pick, such as .old, .staging or .bak-*, are never
+# touched.
+STAGING=""
+_cleanup_staging() {
+  if [ -n "$STAGING" ]; then rm -rf -- "$STAGING"; fi
+}
+
+# _unique_sibling <tag>: a not yet existing path "$DOTFILES_DIR.<tag>.<pid>.<random>".
+_unique_sibling() {
+  local path
+  while :; do
+    path="$DOTFILES_DIR.$1.$$.$RANDOM"
+    if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+}
+
+# _stage: create a fresh empty staging directory next to $DOTFILES_DIR (same
+# filesystem, so the final swap is a rename) and set STAGING to its path. It
+# is removed again on exit unless the swap succeeded.
 _stage() {
-  local staging="$DOTFILES_DIR.staging"
-  rm -rf -- "$staging"
   mkdir -p "$(dirname "$DOTFILES_DIR")"
-  mkdir "$staging"
-  printf '%s\n' "$staging"
+  STAGING="$(_unique_sibling staging)"
+  mkdir "$STAGING"
+  trap _cleanup_staging EXIT
 }
 
-# _swap_in <staging>: replace $DOTFILES_DIR by the staged copy, so the result
-# mirrors the source exactly and nothing deleted upstream lingers.
+# _swap_in: replace $DOTFILES_DIR by the staged copy, so the result mirrors
+# the source exactly and nothing deleted upstream lingers.
 _swap_in() {
-  local staging="$1" old="$DOTFILES_DIR.old"
-  _write_marker "$staging"
-  rm -rf -- "$old"
+  local old
+  old="$(_unique_sibling old)"
+  _write_marker "$STAGING"
   if [ -e "$DOTFILES_DIR" ]; then mv -- "$DOTFILES_DIR" "$old"; fi
-  if ! mv -- "$staging" "$DOTFILES_DIR"; then
+  if ! mv -- "$STAGING" "$DOTFILES_DIR"; then
     if [ -e "$old" ]; then mv -- "$old" "$DOTFILES_DIR"; fi
     die "could not move the new copy into $DOTFILES_DIR"
   fi
+  STAGING=""
+  # The old directory was ours (marker checked) or empty, and the name is unique.
   rm -rf -- "$old"
 }
 
 # fetch_local: mirror $DOTFILES_SRC into $DOTFILES_DIR, leaving .git behind.
 fetch_local() {
-  local src="${DOTFILES_SRC%/}" entry name staging
+  local src="${DOTFILES_SRC%/}" entry name
   [ -f "$src/install.sh" ] && [ -f "$src/lib/log.sh" ] || die "DOTFILES_SRC is not a dotfiles checkout: $src"
   if [ "$dry_run" = 1 ]; then
     log_info "would copy $src to $DOTFILES_DIR"
     return 0
   fi
-  staging="$(_stage)"
+  _stage
   for entry in "$src"/* "$src"/.[!.]* "$src"/..?*; do
     [ -e "$entry" ] || [ -L "$entry" ] || continue
     name="${entry##*/}"
     [ "$name" != .git ] || continue
     [ "$name" != "$DF_MARKER" ] || continue
-    cp -a -- "$entry" "$staging/"
+    cp -a -- "$entry" "$STAGING/"
   done
-  _swap_in "$staging"
+  _swap_in
   log_info "copied $src to $DOTFILES_DIR"
 }
 
 # fetch_tarball: download the GitHub tarball for $DOTFILES_REF and mirror it.
 fetch_tarball() {
-  local repo="${DOTFILES_REPO%.git}" ref="${DOTFILES_REF:-main}" staging
+  local repo="${DOTFILES_REPO%.git}" ref="${DOTFILES_REF:-main}"
   command -v curl >/dev/null 2>&1 || die "neither git nor curl is available; install one or set DOTFILES_SRC"
   command -v tar >/dev/null 2>&1 || die "tar is required to unpack the tarball"
   if [ "$dry_run" = 1 ]; then
     log_info "would download $repo/archive/$ref.tar.gz into $DOTFILES_DIR"
     return 0
   fi
-  staging="$(_stage)"
-  curl -fsSL "$repo/archive/$ref.tar.gz" | tar -xz --strip-components=1 -C "$staging"
-  _swap_in "$staging"
+  _stage
+  curl -fsSL "$repo/archive/$ref.tar.gz" | tar -xz --strip-components=1 -C "$STAGING"
+  _swap_in
   log_info "downloaded $repo ($ref) to $DOTFILES_DIR"
 }
 

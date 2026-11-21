@@ -80,8 +80,10 @@ df_link() {
   # Left behind by df_backup_file only when it is our own, stale, symlink.
   if [ -L "$dest" ]; then rm -f -- "$dest"; fi
   mkdir -p "$(dirname "$dest")"
-  ln -s "$target" "$dest"
+  # Listed first: only manifest entries count as ours, so a crash between the
+  # two steps must not leave an unlisted link of ours behind.
   _df_manifest_add "$dest"
+  ln -s "$target" "$dest"
   log_info "linked $dest"
 }
 

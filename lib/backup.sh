@@ -15,15 +15,16 @@ df_dir_managed() {
 }
 
 # df_is_ours <path>: a symlink into $DOTFILES_DIR that this installer made,
-# i.e. the directory is marked as ours (or is gone, leaving a dangling link).
-# Without the marker a link into that path belongs to somebody else.
+# which means it is listed in the manifest (~/.config/dotfiles/links). A link
+# into that path that is not listed, dangling or not, belongs to the user.
 df_is_ours() {
+  local manifest="$HOME/.config/dotfiles/links"
   [ -L "$1" ] || return 1
   case "$(readlink "$1")" in
     "${DOTFILES_DIR:?}"/*) ;;
     *) return 1 ;;
   esac
-  df_dir_managed || [ ! -e "$1" ]
+  [ -f "$manifest" ] && grep -qxF -- "$1" "$manifest"
 }
 
 # df_backup_init: create this run's backup directory (once per process) and,

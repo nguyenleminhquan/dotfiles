@@ -287,4 +287,59 @@ bash "$dotfiles_dir/uninstall.sh" --purge
 assert_file_absent "$dotfiles_dir"
 rm -rf "$tmpsrc" "$HOME/.dotfiles-backup"
 
+# case_refusal_advice_is_safe: following the refusal message literally, then
+# installing (twice, so the swap path runs too), must not delete the moved
+# directory.
+reset_installer_state
+mkdir -p "$HOME/.dotfiles"
+printf 'my own bashrc\n' >"$HOME/.dotfiles/bashrc"
+ln -sfn "$HOME/.dotfiles/bashrc" "$HOME/.bashrc"
+err="$(run_install --profile minimal 2>&1 || true)"
+mv_cmd="$(sed -n "s/.*for example: \(mv '[^']*' '[^']*'\),.*/\1/p" <<<"$err")"
+assert_ok "refusal message contains a mv command" -- test -n "$mv_cmd"
+eval "$mv_cmd"
+moved="$(find "$HOME" -maxdepth 1 -name '.dotfiles.bak-*' | head -n 1)"
+assert_ok "advice moved the directory" -- test -f "$moved/bashrc"
+run_install --profile minimal
+run_install --profile minimal
+assert_eq "$(cat "$moved/bashrc")" "my own bashrc" "moved-aside directory survives the installer"
+assert_ok "fresh install is ours" -- test -f "$dotfiles_dir/.dotfiles-managed"
+assert_eq "$(find "$HOME" -maxdepth 1 \( -name '.dotfiles.old*' -o -name '.dotfiles.staging*' \) | wc -l | tr -d ' ')" "0" "no temporary directories left behind"
+bash "$dotfiles_dir/uninstall.sh"
+rm -rf "$moved"
+rm -f "$HOME/.bashrc"
+printf 'alias mine=1\n' >"$HOME/.bashrc"
+reset_installer_state
+
+# case_user_named_siblings_untouched: .staging and .old next to ~/.dotfiles are
+# the user's if they exist; the installer's own temporary names are unique.
+mkdir -p "$HOME/.dotfiles.staging" "$HOME/.dotfiles.old"
+printf 'precious\n' >"$HOME/.dotfiles.staging/notes"
+printf 'precious too\n' >"$HOME/.dotfiles.old/notes"
+run_install --profile minimal
+run_install --profile minimal
+assert_eq "$(cat "$HOME/.dotfiles.staging/notes")" "precious" "user's .dotfiles.staging survives"
+assert_eq "$(cat "$HOME/.dotfiles.old/notes")" "precious too" "user's .dotfiles.old survives"
+bash "$dotfiles_dir/uninstall.sh"
+rm -rf "$HOME/.dotfiles.staging" "$HOME/.dotfiles.old"
+reset_installer_state
+
+# case_dangling_user_link_is_not_ours: a dangling symlink into ~/.dotfiles that
+# is not in our manifest (the user moved their own dotfiles away) is a user
+# file: backed up as a symlink, restored by uninstall.
+mkdir -p "$HOME/.dotfiles"
+printf 'my own bashrc\n' >"$HOME/.dotfiles/bashrc"
+ln -sfn "$HOME/.dotfiles/bashrc" "$HOME/.bashrc"
+mv "$HOME/.dotfiles" "$HOME/mydots"
+run_install --profile minimal
+assert_eq "$(readlink "$HOME/.dotfiles-backup/original/.bashrc")" "$HOME/.dotfiles/bashrc" "dangling user link backed up as a symlink"
+assert_linked .bashrc
+bash "$dotfiles_dir/uninstall.sh"
+assert_eq "$(readlink "$HOME/.bashrc")" "$HOME/.dotfiles/bashrc" "dangling user link restored"
+assert_eq "$(cat "$HOME/mydots/bashrc")" "my own bashrc" "moved directory untouched"
+rm -rf "$HOME/mydots"
+rm -f "$HOME/.bashrc"
+printf 'alias mine=1\n' >"$HOME/.bashrc"
+reset_installer_state
+
 rm -rf "$snap"
