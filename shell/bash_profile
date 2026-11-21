@@ -1,1 +1,11 @@
-# Placeholder: filled in by a later task.
+# shellcheck shell=bash
+# bash login shells. When this file exists bash skips ~/.profile, so load it
+# explicitly, then ~/.bashrc (which returns early unless interactive).
+if [ -r "$HOME/.profile" ]; then
+  # shellcheck source=/dev/null
+  . "$HOME/.profile"
+fi
+if [ -r "$HOME/.bashrc" ]; then
+  # shellcheck source=/dev/null
+  . "$HOME/.bashrc"
+fi

@@ -1,1 +1,6 @@
-# Placeholder: filled in by a later task.
+# shellcheck shell=sh
+# Login shells. May be read by /bin/sh, so keep it POSIX and silent.
+if [ -r "${DOTFILES_DIR:-$HOME/.dotfiles}/shell/env.sh" ]; then
+  # shellcheck source=/dev/null
+  . "${DOTFILES_DIR:-$HOME/.dotfiles}/shell/env.sh"
+fi

@@ -1,1 +1,4 @@
-# Placeholder: filled in by a later task.
+# shellcheck shell=bash
+# Minimal for now (the full interactive setup comes later). The export stops
+# a bash started from inside zsh from switching back to zsh.
+export DOTFILES_IN_ZSH=1

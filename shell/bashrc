@@ -1,1 +1,28 @@
-# Placeholder: filled in by a later task.
+# shellcheck shell=bash
+# Read by interactive bash and by `ssh host cmd`, so everything before the
+# interactive guard must be silent and cheap.
+if [ -r "${DOTFILES_DIR:-$HOME/.dotfiles}/shell/env.sh" ]; then
+  # shellcheck source=/dev/null
+  . "${DOTFILES_DIR:-$HOME/.dotfiles}/shell/env.sh"
+fi
+[[ $- == *i* ]] || return 0
+
+# Hand an interactive session over to zsh when it is safe to do so:
+#  - stdin and stdout are terminals, so scripts and pipes keep bash
+#  - not in zsh already and not switched before (DOTFILES_IN_ZSH)
+#  - ~/.no-zsh is the opt-out
+#  - not `bash -i -c cmd`, because exec would drop the command
+#  - zsh actually starts
+# The variable is set only for the new process, so a failed exec leaves no trace.
+if [[ -t 0 && -t 1 && -z ${DOTFILES_IN_ZSH:-} && -z ${BASH_EXECUTION_STRING:-} &&
+  ! -e "$HOME/.no-zsh" ]] && command -v zsh >/dev/null 2>&1 &&
+  zsh -c true >/dev/null 2>&1; then
+  DOTFILES_IN_ZSH=1 exec zsh
+fi
+
+# Interactive pieces added by later tasks: aliases.sh, history.sh, prompt.
+
+if [ -r "$HOME/.bashrc.local" ]; then
+  # shellcheck source=/dev/null
+  . "$HOME/.bashrc.local"
+fi
