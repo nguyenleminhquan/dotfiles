@@ -58,8 +58,22 @@ if [ "$_df_profile" = workstation ]; then
 fi
 unset _df_profile
 
-# WSL hook (added with the WSL support): source "$DOTFILES_DIR/shell/wsl.sh"
-# here when running under WSL.
+# WSL (1 and 2): /proc/version names Microsoft. Read with the shell's own
+# `read`, not grep, so a native host pays no fork for the question.
+# DF_PROC_VERSION_FILE is the test override that lib/detect.sh knows too.
+_df_wsl=0
+if [ -r "${DF_PROC_VERSION_FILE:-/proc/version}" ]; then
+  read -r _df_pv <"${DF_PROC_VERSION_FILE:-/proc/version}" || :
+  case "${_df_pv:-}" in
+    *[Mm][Ii][Cc][Rr][Oo][Ss][Oo][Ff][Tt]*) _df_wsl=1 ;;
+  esac
+  unset _df_pv
+fi
+if [ "$_df_wsl" != 0 ] && [ -r "$DOTFILES_DIR/shell/wsl.sh" ]; then
+  # shellcheck source=shell/wsl.sh
+  . "$DOTFILES_DIR/shell/wsl.sh"
+fi
+unset _df_wsl
 
 # Per-machine overrides, kept out of git.
 if [ -r "$HOME/.config/dotfiles/env.local" ]; then

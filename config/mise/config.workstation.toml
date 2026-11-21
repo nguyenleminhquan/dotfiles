@@ -1,1 +1,30 @@
-# Placeholder: filled in by a later task.
+# Tools the `workstation` profile adds on top of config.toml (loaded with
+# MISE_ENV=workstation, which shell/env.sh sets for this profile). Pinned to
+# exact versions like config.toml; to bump one, change it here, run
+# `mise install` and check `--version` on the oldest host (Ubuntu 20.04,
+# glibc 2.31).
+
+[tools]
+opentofu = "1.13.9"
+terragrunt = "1.0.1"
+# opencode ships a musl build too, but it is a dynamically linked musl binary
+# (its loader, /lib/ld-musl-x86_64.so.1, does not exist on Ubuntu or Rocky), so
+# only the plain glibc x64 asset runs here. The pattern leaves out the
+# "-baseline" (no AVX2) and "-musl" assets.
+"github:anomalyco/opencode" = { version = "1.14.33", asset_pattern = "*linux-x64.tar.gz" }
+# Prebuilt python from python-build-standalone; it runs on glibc 2.31.
+python = "3.12.16"
+
+# More tools to enable when needed (pin an exact version, check it runs on the
+# oldest host, then add its command to commands.workstation):
+# werf
+# cmctl
+# dive
+# hyperfine
+# dua
+
+[env]
+# Only creates the virtual environment (python 3.12 is what Ansible 2.16 needs);
+# nothing is pip-installed. An existing venv at this path is used as it is, and
+# it is never removed by the uninstaller.
+_.python.venv = { path = "{{env.HOME}}/python-env/ansible2.16", create = true }

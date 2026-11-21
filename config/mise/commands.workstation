@@ -1,2 +1,7 @@
 # Like commands.server, for the tools of config.workstation.toml (the workstation
-# profile checks both files). No tools there yet.
+# profile checks both files). `python` is the shim: `python3` could be satisfied
+# by a system python and prove nothing.
+tofu opentofu
+terragrunt terragrunt
+opencode github:anomalyco/opencode
+python python

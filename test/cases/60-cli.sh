@@ -55,7 +55,11 @@ assert_ok "bad usage prints the usage on stderr" -- grep -q "^usage: dotfiles" <
 # cmds_of <file>: the commands; keys_of <file>: the mise keys; both ignore comments.
 cmds_of() { awk '{ sub(/#.*/, "") } NF { print $1 }' "$1"; }
 keys_of() { awk '{ sub(/#.*/, "") } NF { print $2 }' "$1" | LC_ALL=C sort; }
-toml_keys() { grep -E '^"(aqua|github):' "$1" | cut -d'"' -f2 | LC_ALL=C sort; }
+# toml_keys <file>: the keys of its [tools] table, quotes removed (registry names
+# such as opentofu and python have none; backend keys such as aqua:... do).
+toml_keys() {
+  awk '/^\[/ { t = ($0 == "[tools]"); next } t && /^[^# \t]/ { k = $0; sub(/ *=.*/, "", k); gsub(/"/, "", k); print k }' "$1" | LC_ALL=C sort
+}
 assert_eq "$(keys_of /src/config/mise/commands.server)" "$(toml_keys "$cfg")" \
   "commands.server lists exactly the tools of config.toml"
 assert_eq "$(keys_of /src/config/mise/commands.workstation)" "$(toml_keys /src/config/mise/config.workstation.toml)" \
@@ -64,7 +68,7 @@ assert_eq "$(cmds_of /src/config/mise/commands.server | sort | uniq -d)" "" "no 
 assert_ne "$(cmds_of /src/config/mise/commands.server | wc -l | tr -d ' ')" 0 "commands.server is not empty"
 tool_cmds=()
 if [ "$DF_PROFILE" != minimal ]; then
-  mapfile -t tool_cmds < <(cmds_of /src/config/mise/commands.server)
+  mapfile -t tool_cmds < <(cmds_of /src/config/mise/commands.server; [ "$DF_PROFILE" != workstation ] || cmds_of /src/config/mise/commands.workstation)
 fi
 (
   # shellcheck source=/dev/null

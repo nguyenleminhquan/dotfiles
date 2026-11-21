@@ -19,14 +19,22 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 
 # Matrix rows. Zsh/Git map to the Dockerfile build args WITH_ZSH/WITH_GIT.
+# A row may narrow itself down: Profiles (default: minimal and server), Cases (a
+# regex on the case name, default: all) and Env (variables set in the container).
+# u20-ws is the workstation row: it pretends to be WSL1 (DF_PROC_VERSION_FILE
+# points at a fixture) and runs only the cases that know that profile, because
+# its install downloads python, opencode and opentofu.
 $rows = @(
     @{ Name = 'u20-zsh';   Base = 'ubuntu:20.04';    Zsh = 1; Git = 1 }
     @{ Name = 'u20-nozsh'; Base = 'ubuntu:20.04';    Zsh = 0; Git = 1 }
     @{ Name = 'u22';       Base = 'ubuntu:22.04';    Zsh = 1; Git = 1 }
     @{ Name = 'u24-nogit'; Base = 'ubuntu:24.04';    Zsh = 1; Git = 0 }
     @{ Name = 'r9';        Base = 'rockylinux:9';    Zsh = 1; Git = 1 }
+    @{ Name = 'u20-ws';    Base = 'ubuntu:20.04';    Zsh = 1; Git = 1
+       Profiles = @('workstation'); Cases = '^(00|60|70)-'
+       Env = @{ DF_PROC_VERSION_FILE = '/src/test/fixtures/proc-version-wsl1' } }
 )
-$profiles = @('minimal', 'server')
+$defaultProfiles = @('minimal', 'server')
 
 function Invoke-Docker {
     # Runs docker against the chosen context; returns exit code and output lines.
@@ -84,6 +92,9 @@ try {
     Write-Host ('-' * 52)
 
     foreach ($row in $rows) {
+        $rowCases = @($cases | Where-Object { -not $row.ContainsKey('Cases') -or $_ -match $row.Cases })
+        if ($rowCases.Count -eq 0) { continue }
+        $rowProfiles = if ($row.ContainsKey('Profiles')) { $row.Profiles } else { $defaultProfiles }
         $tag = "dotfiles-test:$($row.Name)"
         $build = Invoke-Docker @(
             'build', '--quiet',
@@ -102,8 +113,8 @@ try {
             continue
         }
 
-        foreach ($profile in $profiles) {
-            foreach ($case in $cases) {
+        foreach ($profile in $rowProfiles) {
+            foreach ($case in $rowCases) {
                 $runArgs = @('run', '--rm', '--memory', '768m', '--cpus', '1', '--label', 'dotfiles-test')
                 if ($profile -eq 'minimal') {
                     # The minimal profile must work offline.
@@ -112,6 +123,9 @@ try {
                 elseif ($env:GITHUB_TOKEN) {
                     # Value is read from the environment by docker; never printed.
                     $runArgs += @('-e', 'GITHUB_TOKEN')
+                }
+                if ($row.ContainsKey('Env')) {
+                    foreach ($name in $row.Env.Keys) { $runArgs += @('-e', "$name=$($row.Env[$name])") }
                 }
                 $runArgs += @($tag, 'bash', '/src/test/run-case.sh', $case, $profile, $row.Name)
 
