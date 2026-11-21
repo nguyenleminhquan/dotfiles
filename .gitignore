@@ -1,0 +1,10 @@
+# Machine-local overrides and secrets
+*.local
+.env*
+# Test output and SDD workspace
+test/.out/
+.superpowers/
+# Working notes with environment-specific details stay local (public repo)
+docs/design.md
+docs/superpowers/
+tasks/
