@@ -1,9 +1,9 @@
-# Shared git settings. Identity (name, email, signing key, credential helper)
-# belongs in ~/.gitconfig.local, which is included at the end so that it can
-# override anything here, and is never committed.
-
-[core]
-	editor = micro
+# Shared git settings, included from ~/.config/git/config (a real file the
+# installer generates, so `git config --global` never writes into this one).
+# Identity (name, email, signing key, credential helper) belongs in
+# ~/.gitconfig.local, which that file includes after this one.
+# No core.editor: git then falls back to $GIT_EDITOR, $VISUAL and $EDITOR,
+# which shell/aliases.sh points at micro, nano or vi, whichever exists.
 
 [push]
 	default = simple
@@ -22,6 +22,3 @@
 	dump = cat-file -p
 	la = !git config -l | grep alias | cut -c 7-
 	ec = config --global -e
-
-[include]
-	path = ~/.gitconfig.local

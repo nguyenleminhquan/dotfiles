@@ -93,10 +93,11 @@ restore_original() {
 }
 
 df_unlink_all
+df_gen_all_remove
 restore_original
 
 rm -rf -- "$HOME/.cache/zsh/completions"
-rm -f -- "$HOME/.config/dotfiles/profile" "$HOME/.config/dotfiles/links" "$HOME/.config/dotfiles/dir"
+rm -f -- "$HOME/.config/dotfiles/profile" "$HOME/.config/dotfiles/links" "$HOME/.config/dotfiles/generated" "$HOME/.config/dotfiles/dir"
 rmdir "$HOME/.config/dotfiles" 2>/dev/null || true
 
 if [ "$purge" = 1 ]; then

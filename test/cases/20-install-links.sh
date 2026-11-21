@@ -7,9 +7,10 @@ dotfiles_dir="$HOME/.dotfiles"
 manifest="$HOME/.config/dotfiles/links"
 
 # Destinations per profile, relative to $HOME (mirrors the symlink table).
+# .config/git/config is not here: it is a generated real file (see the end of this case).
 minimal_dests=(
   .profile .bash_profile .bashrc .zshenv .zshrc .screenrc
-  .config/git/config .config/micro/settings.json .local/bin/dotfiles
+  .config/micro/settings.json .local/bin/dotfiles
 )
 server_extra=(.config/starship.toml .config/mise/config.toml)
 workstation_extra=(.config/mise/config.workstation.toml)
@@ -59,7 +60,7 @@ printf 'x\n' >"$HOME/.cache/zsh/completions/_stale"
 # Remember every pre-existing dotfile (skeleton files differ per OS) so the
 # restore can be checked for every path the installer may touch.
 snap="$(mktemp -d)"
-tracked=("${minimal_dests[@]}" "${server_extra[@]}" "${workstation_extra[@]}" .bash_logout .gitconfig)
+tracked=("${minimal_dests[@]}" .config/git/config "${server_extra[@]}" "${workstation_extra[@]}" .bash_logout .gitconfig)
 for f in "${tracked[@]}"; do
   if [ -e "$HOME/$f" ] || [ -L "$HOME/$f" ]; then
     mkdir -p "$snap/$(dirname "$f")"
@@ -340,6 +341,70 @@ assert_eq "$(cat "$HOME/mydots/bashrc")" "my own bashrc" "moved directory untouc
 rm -rf "$HOME/mydots"
 rm -f "$HOME/.bashrc"
 printf 'alias mine=1\n' >"$HOME/.bashrc"
+reset_installer_state
+
+# --- case_generated_git_config -------------------------------------------------
+# ~/.config/git/config is a REAL file that only includes the repo settings and
+# the local overrides, so tools that run `git config --global` (safe.directory,
+# gh auth setup-git, user.email) never write into the tracked file in the repo.
+gitglobal="$HOME/.config/git/config"
+repo_gitcfg="$dotfiles_dir/config/git/config"
+restore_gitcfg() { rm -rf "$gitglobal"; mkdir -p "$HOME/.config/git"; cp -a "$snap/.config/git/config" "$gitglobal"; }
+reset_installer_state
+restore_gitcfg
+run_install --profile minimal
+assert_ok "git config is a real file, not a link" -- test -f "$gitglobal" -a ! -L "$gitglobal"
+assert_ok "git config includes the repo file" -- grep -qxF "	path = $repo_gitcfg" "$gitglobal"
+assert_ok "git config includes ~/.gitconfig.local" -- grep -qxF "	path = ~/.gitconfig.local" "$gitglobal"
+assert_fail "git config is not in the link manifest" -- grep -qxF "$gitglobal" "$manifest"
+assert_eq "$(cat "$HOME/.dotfiles-backup/original/.config/git/config")" "$(cat "$snap/.config/git/config")" "the user's git config was backed up"
+repo_sum="$(sha256sum <"$repo_gitcfg")"
+printf '[user]\n\temail = someone@example.invalid\n[safe]\n\tdirectory = /somewhere\n' >>"$gitglobal"
+assert_eq "$(sha256sum <"$repo_gitcfg")" "$repo_sum" "a global write does not change the repo file"
+# re-install keeps what tools added, makes no new backup, and changes nothing
+h5="$(home_hash)"
+run_install --profile minimal
+assert_eq "$(home_hash)" "$h5" "re-install leaves an extended git config alone"
+assert_eq "$(find "$HOME/.dotfiles-backup" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" "2" "no new backup for our own file"
+# uninstall removes it only while it is untouched: this one was extended
+out="$(bash "$dotfiles_dir/uninstall.sh" 2>&1)"
+assert_ok "uninstall keeps an extended git config" -- grep -qF 'someone@example.invalid' "$gitglobal"
+assert_ok "uninstall warns about it" -- grep -qi 'leaving it' <<<"$out"
+assert_file_absent "$HOME/.config/dotfiles/generated"
+restore_gitcfg
+reset_installer_state
+
+# untouched: install, uninstall, and the user's file is back; the install is idempotent
+restore_gitcfg
+run_install --profile "$DF_PROFILE"
+h6="$(home_hash)"
+run_install --profile "$DF_PROFILE"
+assert_eq "$(home_hash)" "$h6" "second install rewrites nothing"
+bash "$dotfiles_dir/uninstall.sh"
+assert_ok "the user's git config is restored byte for byte" -- same_file "$gitglobal" "$snap/.config/git/config"
+assert_file_absent "$HOME/.config/dotfiles/generated"
+reset_installer_state
+
+# a link left by an older install is replaced by a real file, never written through
+restore_gitcfg
+run_install --profile minimal
+rm -f "$gitglobal"
+ln -s "$repo_gitcfg" "$gitglobal"
+printf '%s\n' "$gitglobal" >>"$manifest"
+repo_sum="$(sha256sum <"$repo_gitcfg")"
+run_install --profile minimal
+assert_ok "old-style link becomes a real file" -- test -f "$gitglobal" -a ! -L "$gitglobal"
+assert_eq "$(sha256sum <"$repo_gitcfg")" "$repo_sum" "repo file untouched by the migration"
+assert_fail "old-style link left the manifest" -- grep -qxF "$gitglobal" "$manifest"
+bash "$dotfiles_dir/uninstall.sh"
+restore_gitcfg
+reset_installer_state
+
+# a user file that already includes nothing of ours is backed up, even with --dry-run announcing it
+restore_gitcfg
+out="$(run_install --profile minimal --dry-run 2>&1)"
+assert_ok "dry run announces the generated file" -- grep -q "would write $gitglobal" <<<"$out"
+assert_ok "dry run leaves the user's file alone" -- same_file "$gitglobal" "$snap/.config/git/config"
 reset_installer_state
 
 rm -rf "$snap"
