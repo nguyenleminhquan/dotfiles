@@ -66,8 +66,9 @@ if [[ -z ${_df_etc_bashrc_done:-} && -r ${DF_ETC_BASHRC:-/etc/bashrc} ]]; then
   . "${DF_ETC_BASHRC:-/etc/bashrc}"
 fi
 
-# Interactive setup shared with zsh. The network helpers come after these.
-for _df_f in aliases history tools; do
+# Interactive setup shared with zsh. netdebug comes last: netshoot uses the
+# kube helpers that tools.sh loads.
+for _df_f in aliases history tools netdebug; do
   if [ -r "$DOTFILES_DIR/shell/$_df_f.sh" ]; then
     # shellcheck source=/dev/null
     . "$DOTFILES_DIR/shell/$_df_f.sh"

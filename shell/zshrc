@@ -54,6 +54,10 @@ fi
 # shellcheck source=/dev/null
 [[ -r "$_df_dir/shell/tools.sh" ]] && source "$_df_dir/shell/tools.sh"
 
+# port, certinfo and netshoot (netshoot uses the kube helpers loaded above).
+# shellcheck source=/dev/null
+[[ -r "$_df_dir/shell/netdebug.sh" ]] && source "$_df_dir/shell/netdebug.sh"
+
 unset _df_dir _df_f
 
 # Per-machine overrides, kept out of git.

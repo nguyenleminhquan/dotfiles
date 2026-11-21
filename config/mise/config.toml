@@ -5,10 +5,10 @@
 # release asset (no version listing through the GitHub API, so the
 # unauthenticated 60 requests/hour limit is not an issue). All of them are
 # static or musl builds, so they run on the oldest supported host (Ubuntu
-# 20.04, glibc 2.31). Most come from the aqua registry. starship, fd and bat
-# use the github backend instead: the aqua registry picks their glibc ("gnu")
-# build, and only an explicit asset_pattern selects the musl one. To bump a
-# tool, change the version here, run `mise install`, and check that
+# 20.04, glibc 2.31). Most come from the aqua registry. starship, fd, bat and
+# trippy use the github backend instead: the aqua registry picks their glibc
+# ("gnu") build, and only an explicit asset_pattern selects the musl one. To
+# bump a tool, change the version here, run `mise install`, and check that
 # `--version` still works on the oldest host.
 
 [settings]
@@ -37,6 +37,17 @@ download_cache = false
 "github:sharkdp/fd" = { version = "10.5.2", asset_pattern = "*x86_64-unknown-linux-musl.tar.gz" }
 "aqua:BurntSushi/ripgrep" = "15.2.0"
 "github:sharkdp/bat" = { version = "0.26.1", asset_pattern = "*x86_64-unknown-linux-musl.tar.gz" }
+
+# Network debugging (see shell/netdebug.sh for port, certinfo and netshoot).
+# trippy (the `trip` command) needs CAP_NET_RAW on Linux: its --unprivileged
+# mode only exists on macOS, so use sudo or setcap cap_net_raw+p on the binary.
+"aqua:mr-karan/doggo" = "1.4.2"
+"aqua:ducaale/xh" = "0.26.3"
+"aqua:fullstorydev/grpcurl" = "1.9.4"
+"aqua:vi/websocat" = "1.14.2"
+"aqua:smallstep/cli" = "0.31.0"
+"aqua:stern/stern" = "1.35.0"
+"github:fujiapple852/trippy" = { version = "0.13.0", asset_pattern = "*x86_64-unknown-linux-musl.tar.gz" }
 
 # Other
 "aqua:go-task/task" = "3.54.0"
