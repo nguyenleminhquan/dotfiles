@@ -201,11 +201,16 @@ _df_mise_installs_snapshot() {
   )
 }
 
-# df_mise_install [profile]: `mise install --yes` for the linked config. A
-# GITHUB_TOKEN from the environment, or from ~/.config/dotfiles/env.local,
+# df_mise_install [profile]: `mise install --yes` for the linked config, and
+# for nothing else: whatever else mise would read (~/.tool-versions,
+# ~/mise.toml, /etc/mise, conf.d and config.local.toml next to our config) is
+# not ours to install, and the installs are recorded as ours. That is why mise
+# runs from an empty directory, with a config directory that holds only
+# symlinks to our files, no system config and no look-up above the temp dir.
+# A GITHUB_TOKEN from the environment, or from ~/.config/dotfiles/env.local,
 # reaches mise (it raises the GitHub API limit); it is never stored or printed.
 df_mise_install() {
-  local profile="${1:-server}" mise data="$HOME/.local/share/mise" tok="${GITHUB_TOKEN:-}" state tmp rc=0
+  local profile="${1:-server}" mise data="$HOME/.local/share/mise" tok="${GITHUB_TOKEN:-}" state tmp rc=0 f
   mise="$(command -v mise 2>/dev/null)" || {
     log_error "mise is not installed"
     return 1
@@ -221,12 +226,18 @@ df_mise_install() {
   state="$(_df_tools_dir)"
   if [ ! -e "$data" ] && [ ! -L "$data" ]; then _df_tools_mark mise-data; fi
   tmp="$(mktemp -d)"
+  mkdir -p "$tmp/cwd" "$tmp/mise-config" "$tmp/mise-system"
+  ln -s "$HOME/.config/mise/config.toml" "$tmp/mise-config/config.toml"
+  f="$HOME/.config/mise/config.workstation.toml"
+  if [ "$profile" = workstation ] && [ -e "$f" ]; then ln -s "$f" "$tmp/mise-config/config.workstation.toml"; fi
   _df_mise_installs_snapshot >"$tmp/before"
   log_info "running mise install"
   (
     if [ -n "$tok" ]; then export GITHUB_TOKEN="$tok"; fi
+    unset MISE_GLOBAL_CONFIG_FILE MISE_CONFIG_FILE MISE_ENV
     if [ "$profile" = workstation ]; then export MISE_ENV=workstation; fi
-    cd "$HOME" && "$mise" install --yes >&2
+    export MISE_CONFIG_DIR="$tmp/mise-config" MISE_SYSTEM_CONFIG_DIR="$tmp/mise-system" MISE_CEILING_PATHS="$tmp"
+    cd "$tmp/cwd" && "$mise" install --yes >&2
   ) || rc=$?
   _df_mise_installs_snapshot >"$tmp/after"
   if [ -n "$(LC_ALL=C comm -13 "$tmp/before" "$tmp/after")" ]; then
@@ -242,15 +253,33 @@ df_mise_install() {
   fi
 }
 
+# _df_tool_real <tool>: print the path of the real executable, never a mise
+# shim (a shim starts mise, which would read its state from the wrong place
+# when a tool runs with the XDG directories moved); fail when there is none.
+_df_tool_real() {
+  local p
+  if command -v mise >/dev/null 2>&1 && p="$(cd / && mise which "$1" 2>/dev/null)" && [ -x "$p" ]; then
+    printf '%s\n' "$p"
+    return 0
+  fi
+  p="$(command -v "$1" 2>/dev/null)" || return 1
+  case "$p" in */mise/shims/*) return 1 ;; esac
+  printf '%s\n' "$p"
+}
+
 # df_gen_completions: write ~/.cache/zsh/completions/_<tool> for each tool in
 # $DF_COMPLETION_TOOLS that is on PATH, and drop the file of one that is gone.
 # `compinit -C` (see shell/zshrc) never refreshes its dump, so whenever the set
 # of completions changes the dump is deleted and zsh rebuilds it once.
+# The tools run with their XDG directories in a scratch directory: k9s, for one,
+# creates ~/.local/state/k9s even for `completion`, and nothing but the
+# completion file may be left behind by this step.
 df_gen_completions() {
-  local dir="$HOME/.cache/zsh/completions" tool out cur changed=0
+  local dir="$HOME/.cache/zsh/completions" tool real out cur changed=0 scratch
   mkdir -p "$dir"
+  scratch="$(mktemp -d)"
   for tool in "${DF_COMPLETION_TOOLS[@]}"; do
-    if ! command -v "$tool" >/dev/null 2>&1; then
+    if ! real="$(_df_tool_real "$tool")"; then
       if [ -e "$dir/_$tool" ]; then
         rm -f -- "$dir/_$tool"
         changed=1
@@ -259,8 +288,8 @@ df_gen_completions() {
     fi
     # go-task has a flag instead of a subcommand.
     case "$tool" in
-      task) out="$(task --completion zsh 2>/dev/null)" || out='' ;;
-      *) out="$("$tool" completion zsh 2>/dev/null)" || out='' ;;
+      task) out="$(XDG_STATE_HOME="$scratch/state" XDG_DATA_HOME="$scratch/data" XDG_CONFIG_HOME="$scratch/config" XDG_CACHE_HOME="$scratch/cache" "$real" --completion zsh 2>/dev/null)" || out='' ;;
+      *) out="$(XDG_STATE_HOME="$scratch/state" XDG_DATA_HOME="$scratch/data" XDG_CONFIG_HOME="$scratch/config" XDG_CACHE_HOME="$scratch/cache" "$real" completion zsh 2>/dev/null)" || out='' ;;
     esac
     case "$out" in
       '#compdef'*) ;;
@@ -276,6 +305,7 @@ df_gen_completions() {
       changed=1
     fi
   done
+  rm -rf "$scratch"
   if [ "$changed" = 1 ]; then
     rm -f -- "$HOME"/.cache/zsh/zcompdump*
     log_info "zsh completions updated"
@@ -325,7 +355,8 @@ _df_tools_remove_mise() {
   list="$(_df_tools_dir)/mise-installs"
   if _df_tools_marked mise-data; then
     # The directory was created by us, so it all goes.
-    rm -rf -- "$data" "$HOME/.cache/mise" "$HOME/.local/state/mise"
+    # sigstore-rust is the cache of the attestation check mise runs on downloads.
+    rm -rf -- "$data" "$HOME/.cache/mise" "$HOME/.cache/sigstore-rust" "$HOME/.local/state/mise"
     _df_tools_unmark mise-data
     rm -f -- "$list"
     log_info "removed the tools installed by mise"
@@ -365,6 +396,8 @@ df_tools_remove() {
   _df_tools_remove_zsh_bin
   rm -rf -- "$HOME/.cache/zsh/completions" "$HOME/.cache/dotfiles/init"
   rm -f -- "$HOME"/.cache/zsh/zcompdump*
+  # Only when empty: the shell may keep its own files in there.
+  rmdir "$HOME/.cache/zsh" "$HOME/.cache/dotfiles" 2>/dev/null || true
   # Empty after the config links are gone; a directory with the user's files stays.
   rmdir "$HOME/.config/mise" 2>/dev/null || true
 }

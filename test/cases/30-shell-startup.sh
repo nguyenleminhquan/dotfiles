@@ -65,12 +65,19 @@ kind_probe() {
 
 # case_path_front_for_inherited_back_entry: VS Code Remote, ssh host tmux, ...
 inherited="/usr/bin:/bin:$HOME/.local/bin:$HOME/.local/share/mise/shims"
-want="$HOME/.local/share/mise/shims:$HOME/.local/bin:/usr/bin:/bin"
+# The mise shims are put on PATH only by the profiles that install tools; on
+# minimal the inherited entry stays where it was.
+sp="$HOME/.local/share/mise/shims:"
+want="${sp}$HOME/.local/bin:/usr/bin:/bin"
+if [ "$DF_PROFILE" = minimal ]; then
+  sp=""
+  want="$HOME/.local/bin:/usr/bin:/bin:$HOME/.local/share/mise/shims"
+fi
 assert_eq "$(PATH="$inherited" bash -ic 'echo "$PATH"' 2>/dev/null)" "$want" "interactive bash moves inherited back entries to the front"
 assert_eq "$(PATH="/usr/bin:$HOME/.local/bin2:$HOME/.local/bin:/bin" bash -ic 'echo "$PATH"' 2>/dev/null)" \
-          "$HOME/.local/share/mise/shims:$HOME/.local/bin:/usr/bin:$HOME/.local/bin2:/bin" "front move keeps look-alike entries and leaves no duplicate"
+          "${sp}$HOME/.local/bin:/usr/bin:$HOME/.local/bin2:/bin" "front move keeps look-alike entries and leaves no duplicate"
 assert_eq "$(PATH="$HOME/.local/bin" /bin/bash -ic 'echo "$PATH"' 2>/dev/null)" \
-          "$HOME/.local/share/mise/shims:$HOME/.local/bin" "front move works when ours is the whole PATH"
+          "${sp}$HOME/.local/bin" "front move works when ours is the whole PATH"
 assert_eq "$(PATH="$inherited" bash -c '. ~/.bashrc; echo "$PATH"')" "$inherited" "non-interactive leaves an inherited PATH alone"
 if command -v zsh >/dev/null; then
   assert_eq "$(PATH="$inherited" zsh -ic 'echo "$PATH"' 2>/dev/null)" "$want" "interactive zsh moves inherited back entries to the front"

@@ -32,6 +32,11 @@ _df_path_add() {
   export PATH
 }
 
+_df_profile=
+if [ -r "$HOME/.config/dotfiles/profile" ]; then
+  read -r _df_profile <"$HOME/.config/dotfiles/profile" || :
+fi
+
 # Interactive shells let our tools win; non-interactive ones (ssh host cmd, CI)
 # keep the system and pinned tools first and see ours only as a fallback.
 case "$-" in
@@ -39,14 +44,14 @@ case "$-" in
   *) _df_where=back ;;
 esac
 _df_path_add "$_df_where" "$HOME/.local/bin"
-_df_path_add "$_df_where" "$HOME/.local/share/mise/shims"
+# The mise shims belong to the profiles that install tools; a minimal host
+# never resolves a command through them.
+case "$_df_profile" in
+  server | workstation) _df_path_add "$_df_where" "$HOME/.local/share/mise/shims" ;;
+esac
 unset _df_where
 
 # The workstation profile selects the mise environment with extra tools.
-_df_profile=
-if [ -r "$HOME/.config/dotfiles/profile" ]; then
-  read -r _df_profile <"$HOME/.config/dotfiles/profile" || :
-fi
 if [ "$_df_profile" = workstation ]; then
   MISE_ENV=workstation
   export MISE_ENV

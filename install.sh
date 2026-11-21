@@ -20,7 +20,8 @@
 # server and workstation also install zsh-bin (only when the host has no zsh 5.8+),
 # mise and its tools, and generate zsh completions: that needs the network.
 # minimal never downloads anything; it removes what a higher profile installed
-# earlier. --no-tools (or DOTFILES_NO_TOOLS=1) links the files and skips all of it.
+# earlier, also with --no-tools. --no-tools (or DOTFILES_NO_TOOLS=1) links the
+# files and skips the downloads.
 set -euo pipefail
 
 # Minimal logging for the fetch phase, before lib/log.sh exists (it may not
@@ -347,11 +348,12 @@ else
 fi
 
 # Tools. server and workstation download them; minimal removes what a higher
-# profile left behind and never touches the network.
-if [ "$no_tools" = 1 ]; then
-  [ "$profile" = minimal ] || log_info "skipping tools (--no-tools)"
-elif [ "$profile" = minimal ]; then
+# profile left behind and never touches the network. --no-tools only gates the
+# downloads: a downgrade must not leave tools behind because of it.
+if [ "$profile" = minimal ]; then
   df_tools_remove
+elif [ "$no_tools" = 1 ]; then
+  log_info "skipping tools (--no-tools)"
 else
   df_tools_install "$profile" || die "tool installation failed; the files are linked, run install.sh again to retry"
 fi

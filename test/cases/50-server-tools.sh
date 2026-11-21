@@ -1,11 +1,33 @@
 # Profile server: zsh-bin where needed, the pinned mise tools, starship,
-# fzf, completions, and the way back to minimal. Server rows download for real
-# (twice: one full install is purged, one is downgraded); minimal rows run
-# offline and only prove that nothing tool-related appears.
+# fzf, completions, and the way back to minimal. Server rows download the full
+# tool list once (it is purged at the end); the downgrade and isolation
+# scenarios install a three-tool copy of the repo instead, so they cost about
+# 70 MB rather than 1 GB. Minimal rows run offline and only prove that nothing
+# tool-related appears.
 # SC2016: the zsh and bash snippets are meant to be expanded by the shell under test.
 # SC2030/SC2031: HOME is changed in subshells on purpose.
 # shellcheck disable=SC2016,SC2030,SC2031
 cfg=/src/config/mise/config.toml
+
+# elf_interp <file>: the program interpreter (PT_INTERP) of a 64-bit
+# little-endian ELF file, nothing when it has none (a static binary). Plain od
+# and dd, so it works on every row without binutils or file(1).
+elf_interp() {
+  local f="$1" phoff phentsize phnum i off po sz
+  phoff="$(od -An -t u8 -j 32 -N 8 "$f" | tr -d ' ')"
+  phentsize="$(od -An -t u2 -j 54 -N 2 "$f" | tr -d ' ')"
+  phnum="$(od -An -t u2 -j 56 -N 2 "$f" | tr -d ' ')"
+  for ((i = 0; i < phnum; i++)); do
+    off=$((phoff + i * phentsize))
+    if [ "$(od -An -t u4 -j "$off" -N 4 "$f" | tr -d ' ')" = 3 ]; then
+      po="$(od -An -t u8 -j $((off + 8)) -N 8 "$f" | tr -d ' ')"
+      sz="$(od -An -t u8 -j $((off + 32)) -N 8 "$f" | tr -d ' ')"
+      # p_filesz includes the terminating NUL.
+      dd if="$f" bs=1 skip="$po" count=$((sz - 1)) 2>/dev/null
+      return 0
+    fi
+  done
+}
 
 # --- case_pure_helpers: no network, no install --------------------------------
 (
@@ -79,6 +101,48 @@ assert_eq "$(home_hash)" "$h0" "dry run changes nothing"
 assert_file_absent "$HOME/.local/bin/mise"
 assert_file_absent "$HOME/.local/share/mise"
 
+# --- case_elf_interp_helper: the check used for the musl assertions below -----------
+assert_ok "a glibc binary names the glibc loader" -- grep -q 'ld-linux' <<<"$(elf_interp "$(command -v bash)")"
+
+# --- case_env_shims_only_for_tool_profiles: no network, no install ------------------
+# A mise shim of a removed or never wanted tool must not resolve on a minimal host.
+fx="$(mktemp -d)"
+mkdir -p "$fx/.config/dotfiles" "$fx/.local/share/mise/shims"
+printf '#!/bin/sh\necho shim\n' >"$fx/.local/share/mise/shims/fakecmd"
+chmod +x "$fx/.local/share/mise/shims/fakecmd"
+shim_lookup() { env -i HOME="$fx" PATH=/usr/bin:/bin DOTFILES_DIR=/src sh -c ". /src/shell/env.sh; command -v fakecmd || echo none"; }
+assert_eq "$(shim_lookup)" none "no saved profile: shims are not on PATH"
+for p in minimal garbage; do
+  echo "$p" >"$fx/.config/dotfiles/profile"
+  assert_eq "$(shim_lookup)" none "profile $p: shims are not on PATH"
+done
+for p in server workstation; do
+  echo "$p" >"$fx/.config/dotfiles/profile"
+  assert_eq "$(shim_lookup)" "$fx/.local/share/mise/shims/fakecmd" "profile $p: shims are on PATH"
+done
+rm -rf "$fx"
+
+# --- case_no_tools_downgrade_removes_tools: forged state, no network -----------------
+# DOTFILES_NO_TOOLS only gates downloads: `install.sh --profile minimal` still
+# takes back what a higher profile put there, and kubectl is gone afterwards.
+fx="$(mktemp -d)"
+inst() { HOME="$fx" DOTFILES_DIR="$fx/dots" DOTFILES_NO_TOOLS=1 bash /src/install.sh "$@" >/dev/null 2>&1; }
+inst --profile server
+mkdir -p "$fx/.local/bin" "$fx/.local/share/mise/shims" "$fx/.local/share/mise/installs/aqua-k/1/bin"
+printf '#!/bin/sh\n:\n' >"$fx/.local/bin/mise"
+printf '#!/bin/sh\necho fake kubectl\n' >"$fx/.local/share/mise/shims/kubectl"
+chmod +x "$fx/.local/bin/mise" "$fx/.local/share/mise/shims/kubectl"
+printf 'mise-bin\nmise-data\n' >"$fx/.config/dotfiles/tools"
+kubectl_lookup() { env -i HOME="$fx" PATH=/usr/bin:/bin bash -lc 'command -v kubectl || echo none'; }
+assert_eq "$(kubectl_lookup)" "$fx/.local/share/mise/shims/kubectl" "server profile reaches kubectl through the shims"
+inst --profile minimal
+assert_eq "$(kubectl_lookup)" none "NO_TOOLS downgrade: kubectl is gone from PATH"
+assert_file_absent "$fx/.local/bin/mise"
+assert_file_absent "$fx/.local/share/mise"
+assert_file_absent "$fx/.config/dotfiles/tools"
+assert_file_absent "$fx/.config/mise/config.toml"
+rm -rf "$fx"
+
 # --- minimal rows: offline, nothing tool-related ---------------------------------
 if [ "$DF_PROFILE" = minimal ]; then
   bash /src/install.sh --profile minimal >/dev/null 2>&1
@@ -92,7 +156,19 @@ if [ "$DF_PROFILE" = minimal ]; then
   return 0
 fi
 
+
 # --- server rows ------------------------------------------------------------------
+# What a purge has to restore: the home tree before the first install. Histories
+# are the shell's own files, not the installer's.
+tree_of() {
+  (
+    cd "$HOME" || exit 1
+    find . -mindepth 1 ! -path './.dotfiles-backup' ! -path './.dotfiles-backup/*' \
+      ! -name '*_history' ! -name '.lesshst' ! -name '.viminfo' | LC_ALL=C sort
+  )
+}
+tree_before="$(tree_of)"
+
 log="$(mktemp)"
 install_server() {
   bash /src/install.sh --profile server >"$log" 2>&1 || { cat "$log" >&2; _fail "install.sh --profile server failed"; }
@@ -100,11 +176,16 @@ install_server() {
 t0=$(date +%s)
 install_server
 printf 'full server install took %ss\n' "$(( $(date +%s) - t0 ))" >&2
+# Generating the completions runs k9s, which creates ~/.local/state/k9s when it
+# runs normally; the installer must not leave that behind. The test has run no
+# tool yet, so either of these existing would be the installer's doing.
+assert_file_absent "$HOME/.local/state/k9s"
+assert_file_absent "$HOME/.cache/starship"
 
 # case_tools_run: every tool of the config runs here (u20-* has glibc 2.31),
 # found through the login shell's PATH like a real session would.
 tool_cmds=(
-  'aqua:starship/starship|starship --version'
+  'github:starship/starship|starship --version'
   'aqua:junegunn/fzf|fzf --version'
   'aqua:kubernetes/kubernetes/kubectl|kubectl version --client'
   'aqua:helm/helm|helm version --short'
@@ -116,9 +197,9 @@ tool_cmds=(
   'aqua:ahmetb/kubectx/kubens|kubens -h'
   'aqua:jqlang/jq|jq --version'
   'aqua:mikefarah/yq|yq --version'
-  'aqua:sharkdp/fd|fd --version'
+  'github:sharkdp/fd|fd --version'
   'aqua:BurntSushi/ripgrep|rg --version'
-  'aqua:sharkdp/bat|bat --version'
+  'github:sharkdp/bat|bat --version'
   'aqua:go-task/task|task --version'
   'aqua:getsops/sops|sops --version --disable-version-check'
   'aqua:FiloSottile/age|age --version'
@@ -127,14 +208,38 @@ tool_cmds=(
 for entry in "${tool_cmds[@]}"; do
   key="${entry%%|*}"
   cmd="${entry#*|}"
-  assert_ok "config pins $key" -- grep -Eq "^\"$key\" = \"[0-9][0-9.]*\"$" "$cfg"
+  case "$key" in
+    github:*)
+      # The github backend takes the first asset that fits, which is the glibc
+      # build here; the pattern has to ask for the musl one.
+      assert_ok "config pins $key to a musl asset" -- \
+        grep -Eq "^\"$key\" = \{ version = \"[0-9][0-9.]*\", asset_pattern = \"[^\"]*x86_64-unknown-linux-musl[^\"]*\" \}$" "$cfg"
+      ;;
+    *) assert_ok "config pins $key" -- grep -Eq "^\"$key\" = \"[0-9][0-9.]*\"$" "$cfg" ;;
+  esac
   assert_ok "$cmd runs" -- bash -lc "$cmd"
 done
-assert_eq "$(grep -c '^"aqua:' "$cfg")" "${#tool_cmds[@]}" "this test covers every tool in the config"
+assert_eq "$(grep -Ec '^"(aqua|github):' "$cfg")" "${#tool_cmds[@]}" "this test covers every tool in the config"
 assert_eq "$(wc -l <"$HOME/.config/dotfiles/mise-installs" | tr -d ' ')" "${#tool_cmds[@]}" "every install is recorded"
 assert_symlink "$HOME/.config/mise/config.toml" "$HOME/.dotfiles/config/mise/config.toml"
 assert_eq "$(bash -lc 'echo ok' 2>&1)" ok "login shell stays silent with tools installed"
 assert_eq "$(bash -c '. ~/.bashrc; echo ok' 2>&1)" ok "ssh-like shell stays silent with tools installed"
+
+# case_tools_are_static_or_musl: none of them may depend on the glibc of the host
+# (the config says so, and the oldest host has the oldest glibc). A tool with no
+# interpreter is static; otherwise the interpreter has to be musl's.
+for entry in "${tool_cmds[@]}"; do
+  cmd="${entry#*|}"
+  tool="${cmd%% *}"
+  bin="$(bash -lc "mise which $tool")"
+  assert_ok "$tool resolves to a file" -- test -f "$bin"
+  interp="$(elf_interp "$bin")"
+  case "$interp" in
+    '' | *musl*) ;;
+    *) _fail "$tool is not static or musl: $bin wants $interp" ;;
+  esac
+done
+
 
 # case_zsh_bin: only the row without a system zsh gets one, in ~/.local.
 case "$DF_ROW" in
@@ -221,31 +326,88 @@ printf 'zsh -i startup ms: %s (median %s)\n' "${times[*]}" "$median" >&2
 assert_ok "zsh startup median ${median}ms < 300ms" -- test "$median" -lt 300
 
 # --- case_purge_removes_what_was_installed ------------------------------------------
+# Running the tools above made state of their own (k9s state, starship cache);
+# that is the user's, not the installer's, and the test clears it so the listing
+# below sees only what the install created.
+rm -rf "$HOME/.local/state/k9s" "$HOME/.cache/starship"
+# Not a list of paths we know about: everything the install created, including
+# what the tools themselves create on the side (k9s state, the sigstore cache),
+# must be gone, so the home tree equals the one before the first install.
 bash "$HOME/.dotfiles/uninstall.sh" --purge >/dev/null 2>&1
-for p in .local/bin/mise .local/bin/zsh .local/share/mise .local/state/mise .cache/mise \
-         .cache/zsh/completions .cache/dotfiles/init .config/mise .config/starship.toml \
-         .config/dotfiles .dotfiles; do
-  assert_file_absent "$HOME/$p"
-done
+assert_eq "$(tree_of)" "$tree_before" "purge restores the home tree of before the first install"
 assert_fail "no zcompdump left" -- bash -c 'ls ~/.cache/zsh/zcompdump* 2>/dev/null | grep -q .'
 assert_eq "$(bash -lc 'command -v kubectl || echo none')" none "no kubectl after purge"
 
-# --- case_profile_downgrade_to_minimal -----------------------------------------------
+# --- small tool set -------------------------------------------------------------------
+# The downgrade and isolation scenarios do not need 19 tools, only some. They
+# run the real installer from a copy of the repo whose mise config lists three
+# (about 70 MB), so the full download happens once per row.
+small_src="$(mktemp -d)"
+cp -a /src/. "$small_src/"
+cat >"$small_src/config/mise/config.toml" <<'TOML'
+[settings]
+download_cache = false
+
+[tools]
+"github:starship/starship" = { version = "1.27.0", asset_pattern = "*x86_64-unknown-linux-musl.tar.gz" }
+"aqua:junegunn/fzf" = "0.75.0"
+"aqua:kubernetes/kubernetes/kubectl" = "1.37.2"
+TOML
+small_install() { DOTFILES_SRC="$small_src" bash "$small_src/install.sh" "$@"; }
+install_small() {
+  small_install --profile server >"$log" 2>&1 || { cat "$log" >&2; _fail "small install.sh --profile server failed"; }
+}
+
+# What a downgrade to minimal must leave: no tool on PATH, no link to the mise or
+# starship configuration, nothing of what the installer downloaded or generated.
+assert_downgraded() { # <scenario>
+  assert_file_absent "$HOME/.config/mise/config.toml"
+  assert_file_absent "$HOME/.config/starship.toml"
+  assert_eq "$(bash -lc 'command -v kubectl || echo none')" none "$1: kubectl is gone from PATH"
+  assert_eq "$(bash -lc 'command -v starship || echo none')" none "$1: starship is gone from PATH"
+  for p in .local/bin/mise .local/bin/zsh .local/share/mise .local/state/mise .cache/mise \
+           .cache/zsh/completions .cache/dotfiles/init .config/dotfiles/tools .config/dotfiles/mise-installs \
+           .config/dotfiles/zsh-bin-files; do
+    assert_file_absent "$HOME/$p"
+  done
+  assert_fail "$1: no zcompdump left" -- bash -c 'ls ~/.cache/zsh/zcompdump* 2>/dev/null | grep -q .'
+  assert_eq "$(cat "$HOME/.config/dotfiles/profile")" minimal "$1: profile is minimal again"
+  assert_ok "$1: minimal links are still in place" -- test -L "$HOME/.bashrc"
+  assert_eq "$(bash -c '. ~/.bashrc; echo ok' 2>&1)" ok "$1: shell works after the downgrade"
+}
+
+# --- case_mise_install_only_our_config ------------------------------------------------
+# Whatever else mise would read must neither be installed nor recorded as ours:
+# ~/.tool-versions, ~/mise.toml (not even trusted), conf.d next to our config,
+# and the system config (redirected into a scratch dir; the test user cannot write /etc).
+sys_cfg="$(mktemp -d)"
+printf '[tools]\n"aqua:FiloSottile/age" = "1.3.2"\n' >"$sys_cfg/config.toml"
+printf 'jq 1.8.2\n' >"$HOME/.tool-versions"
+printf '[tools]\n"aqua:FiloSottile/age" = "1.3.2"\n' >"$HOME/mise.toml"
+mkdir -p "$HOME/.config/mise/conf.d"
+printf '[tools]\n"aqua:mikefarah/yq" = "4.54.3"\n' >"$HOME/.config/mise/conf.d/extra.toml"
+t0=$(date +%s)
+MISE_SYSTEM_CONFIG_DIR="$sys_cfg" install_small
+printf 'small server install took %ss\n' "$(( $(date +%s) - t0 ))" >&2
+assert_ok "kubectl is installed from our config" -- bash -lc 'command -v kubectl'
+assert_eq "$(find "$HOME/.local/share/mise/installs" -mindepth 1 -maxdepth 1 ! -name '.*' -printf '%f\n' | LC_ALL=C sort | tr '\n' ' ')" \
+  "aqua-junegunn-fzf aqua-kubernetes-kubernetes-kubectl github-starship-starship " "only our three tools are installed"
+assert_eq "$(wc -l <"$HOME/.config/dotfiles/mise-installs" | tr -d ' ')" 3 "only our three installs are recorded"
+assert_fail "no foreign tool is recorded" -- grep -Eq 'jq|age/|yq' "$HOME/.config/dotfiles/mise-installs"
+
+# --- case_profile_downgrade_to_minimal, with --no-tools -------------------------------
 # A prod host that got "server" by mistake: going back to minimal must leave no
-# tool on PATH and no link to the mise or starship configuration.
-install_server
+# tool on PATH even when the downgrade is run with DOTFILES_NO_TOOLS=1 (it only
+# gates downloads). Files that are not ours stay.
+DOTFILES_NO_TOOLS=1 small_install --profile minimal >/dev/null 2>&1
+assert_downgraded "NO_TOOLS downgrade"
+assert_eq "$(cat "$HOME/.tool-versions")" "jq 1.8.2" "the user's ~/.tool-versions is untouched"
+assert_ok "the user's ~/mise.toml is untouched" -- test -f "$HOME/mise.toml"
+assert_ok "the user's conf.d file is untouched" -- test -f "$HOME/.config/mise/conf.d/extra.toml"
+rm -rf "$HOME/.tool-versions" "$HOME/mise.toml" "$HOME/.config/mise"
+
+# --- case_profile_downgrade_to_minimal ------------------------------------------------
+install_small
 assert_ok "kubectl is there before the downgrade" -- bash -lc 'command -v kubectl'
-bash /src/install.sh --profile minimal >/dev/null 2>&1
-assert_file_absent "$HOME/.config/mise/config.toml"
-assert_file_absent "$HOME/.config/starship.toml"
-assert_eq "$(bash -lc 'command -v kubectl || echo none')" none "kubectl is gone from PATH"
-assert_eq "$(bash -lc 'command -v starship || echo none')" none "starship is gone from PATH"
-for p in .local/bin/mise .local/bin/zsh .local/share/mise .local/state/mise .cache/mise \
-         .cache/zsh/completions .cache/dotfiles/init .config/dotfiles/tools .config/dotfiles/mise-installs \
-         .config/dotfiles/zsh-bin-files; do
-  assert_file_absent "$HOME/$p"
-done
-assert_fail "no zcompdump left" -- bash -c 'ls ~/.cache/zsh/zcompdump* 2>/dev/null | grep -q .'
-assert_eq "$(cat "$HOME/.config/dotfiles/profile")" minimal "profile is minimal again"
-assert_ok "minimal links are still in place" -- test -L "$HOME/.bashrc"
-assert_eq "$(bash -c '. ~/.bashrc; echo ok' 2>&1)" ok "shell works after the downgrade"
+small_install --profile minimal >/dev/null 2>&1
+assert_downgraded "plain downgrade"

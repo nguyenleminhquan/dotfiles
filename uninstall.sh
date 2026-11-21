@@ -7,7 +7,8 @@
 # saved in ~/.dotfiles-backup/original/ (never overwriting anything that exists
 # now), drops the completion and shell-init caches and the installer state.
 # --purge also removes what install.sh installed (mise, the tools mise
-# installed, zsh-bin; see lib/tools.sh) and $DOTFILES_DIR itself. The backups
+# installed, zsh-bin; see lib/tools.sh), $DOTFILES_DIR itself and the empty
+# directories that leaves behind in $HOME. The backups
 # are kept either way. Without --purge the tools stay, and so does the record
 # of them, so that a later --purge still knows what to remove.
 set -euo pipefail
@@ -116,5 +117,14 @@ if [ "$purge" = 1 ]; then
 fi
 
 rmdir "$HOME/.config/dotfiles" 2>/dev/null || true
+
+if [ "$purge" = 1 ]; then
+  # What the install created and nothing else uses any more: empty directories
+  # only (rmdir never removes content), children before parents.
+  for d in .config/git .config/micro .config/mise .cache/zsh .cache/dotfiles \
+    .local/bin .local/share .local/state .local .cache .config; do
+    rmdir "$HOME/$d" 2>/dev/null || true
+  done
+fi
 
 log_info "uninstalled"
