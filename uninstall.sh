@@ -104,7 +104,7 @@ restore_original
 
 rm -rf -- "$HOME/.cache/zsh/completions" "$HOME/.cache/dotfiles/init"
 rm -f -- "$HOME"/.cache/zsh/zcompdump*
-rm -f -- "$HOME/.config/dotfiles/profile" "$HOME/.config/dotfiles/links" "$HOME/.config/dotfiles/generated" "$HOME/.config/dotfiles/dir"
+rm -f -- "$HOME/.config/dotfiles/profile" "$HOME/.config/dotfiles/links" "$HOME/.config/dotfiles/generated" "$HOME/.config/dotfiles/dir" "$HOME/.config/dotfiles/repo"
 
 if [ "$purge" = 1 ]; then
   df_tools_remove

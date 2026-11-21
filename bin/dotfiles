@@ -1,2 +1,116 @@
 #!/usr/bin/env bash
-# Placeholder: filled in by a later task.
+# The dotfiles command, linked to ~/.local/bin/dotfiles by every profile.
+#
+#   dotfiles update [install.sh options]   fetch the latest code and re-run install.sh
+#   dotfiles doctor                        check the install (exit 1 on any FAIL)
+#   dotfiles uninstall [--purge]           run uninstall.sh
+#   dotfiles profile                       print the installed profile
+set -euo pipefail
+
+# Where the libraries are: the checkout this script lives in (it is usually
+# reached through the symlink in ~/.local/bin).
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd -P)"
+state_dir="$HOME/.config/dotfiles"
+
+die() {
+  printf '[error] %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat >&2 <<'EOF'
+usage: dotfiles <command>
+
+commands:
+  update [options]      fetch the latest code and re-run install.sh with the saved profile
+  doctor                check the install; exit 1 when something FAILs
+  uninstall [--purge]   remove the dotfiles (--purge also removes the tools and the checkout)
+  profile               print the installed profile
+EOF
+}
+
+# state_value <name>: first line of ~/.config/dotfiles/<name>; fails when it is missing.
+state_value() {
+  local value=''
+  [ -r "$state_dir/$1" ] || return 1
+  read -r value <"$state_dir/$1" || :
+  [ -n "$value" ] || return 1
+  printf '%s\n' "$value"
+}
+
+# The install location, as the installer resolves it: the environment, then
+# what it recorded, then ~/.dotfiles.
+DOTFILES_DIR="${DOTFILES_DIR:-$(state_value dir || :)}"
+DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+export DOTFILES_DIR
+
+# saved_profile: the profile install.sh recorded, or an error.
+saved_profile() {
+  state_value profile || die "dotfiles is not installed (no saved profile in $state_dir): run install.sh"
+}
+
+# update: where the new code comes from, first match wins:
+#   1. $DOTFILES_SRC, a local checkout that install.sh mirrors into $DOTFILES_DIR
+#   2. $DOTFILES_DIR is a git clone: fast-forward it, install in place
+#   3. the repo install.sh recorded (~/.config/dotfiles/repo: URL, then ref):
+#      its tarball is unpacked in a temporary directory and installed from there
+cmd_update() {
+  local profile repo ref
+  profile="$(saved_profile)"
+  if [ -n "${DOTFILES_SRC:-}" ]; then
+    exec bash "${DOTFILES_SRC%/}/install.sh" --profile "$profile" "$@"
+  fi
+  if [ -d "$DOTFILES_DIR/.git" ]; then
+    command -v git >/dev/null 2>&1 || die "$DOTFILES_DIR is a git clone but git is not installed"
+    git -C "$DOTFILES_DIR" pull --ff-only || die "git pull --ff-only failed in $DOTFILES_DIR; resolve it there and run update again"
+    exec bash "$DOTFILES_DIR/install.sh" --profile "$profile" "$@"
+  fi
+  if repo="$(sed -n 1p "$state_dir/repo" 2>/dev/null)" && [ -n "$repo" ]; then
+    ref="$(sed -n 2p "$state_dir/repo")"
+    ref="${ref:-main}"
+    command -v curl >/dev/null 2>&1 || die "curl is required to download the update"
+    command -v tar >/dev/null 2>&1 || die "tar is required to unpack the update"
+    # Global, so that the EXIT trap still sees it after this function has returned.
+    update_tmp="$(mktemp -d)"
+    trap 'rm -rf "$update_tmp"' EXIT
+    curl -fsSL "${repo%.git}/archive/$ref.tar.gz" | tar -xz --strip-components=1 -C "$update_tmp" ||
+      die "could not download ${repo%.git} ($ref)"
+    [ -f "$update_tmp/install.sh" ] || die "the download from $repo does not look like dotfiles"
+    DOTFILES_SRC="$update_tmp" bash "$update_tmp/install.sh" --profile "$profile" "$@"
+    return 0
+  fi
+  die "nothing to update from: $DOTFILES_DIR is not a git clone and no repo was recorded; set DOTFILES_SRC to a local checkout, or install with DOTFILES_REPO"
+}
+
+cmd_doctor() {
+  # shellcheck source=lib/doctor.sh
+  . "$here/lib/doctor.sh"
+  if df_doctor; then exit 0; else exit 1; fi
+}
+
+cmd_uninstall() {
+  [ -f "$DOTFILES_DIR/uninstall.sh" ] || die "uninstall.sh not found in $DOTFILES_DIR"
+  exec bash "$DOTFILES_DIR/uninstall.sh" "$@"
+}
+
+main() {
+  local cmd="${1:-}"
+  [ $# -eq 0 ] || shift
+  case "$cmd" in
+    update) cmd_update "$@" ;;
+    doctor) cmd_doctor ;;
+    uninstall) cmd_uninstall "$@" ;;
+    profile) saved_profile ;;
+    help | -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
+exit 0

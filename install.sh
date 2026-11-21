@@ -193,6 +193,9 @@ fetch_local() {
   log_info "copied $src to $DOTFILES_DIR"
 }
 
+# Set when the code came from $DOTFILES_REPO; `dotfiles update` needs the repo later.
+fetched_repo=0
+
 # fetch_tarball: download the GitHub tarball for $DOTFILES_REF and mirror it.
 fetch_tarball() {
   local repo="${DOTFILES_REPO%.git}" ref="${DOTFILES_REF:-main}"
@@ -206,6 +209,7 @@ fetch_tarball() {
   curl -fsSL "$repo/archive/$ref.tar.gz" | tar -xz --strip-components=1 -C "$STAGING"
   _swap_in
   log_info "downloaded $repo ($ref) to $DOTFILES_DIR"
+  fetched_repo=1
 }
 
 # fetch_git: clone into an unused directory, or fast-forward our own clone.
@@ -218,10 +222,12 @@ fetch_git() {
   if [ -d "$DOTFILES_DIR/.git" ]; then
     git -C "$DOTFILES_DIR" pull --ff-only --quiet origin "$ref"
     log_info "updated $DOTFILES_DIR ($ref)"
+    fetched_repo=1
   else
     git clone --quiet --depth 1 --branch "$ref" "$DOTFILES_REPO" "$DOTFILES_DIR"
     _write_marker "$DOTFILES_DIR"
     log_info "cloned ${DOTFILES_REPO} ($ref) to $DOTFILES_DIR"
+    fetched_repo=1
   fi
 }
 
@@ -344,6 +350,13 @@ else
   # The shell startup files cannot find a non-default checkout on their own.
   if [ "$(cat "$state_dir/dir" 2>/dev/null || true)" != "$DOTFILES_DIR" ]; then
     printf '%s\n' "$DOTFILES_DIR" >"$state_dir/dir"
+  fi
+  # `dotfiles update` downloads from here when there is no clone to pull.
+  if [ "$fetched_repo" = 1 ]; then
+    repo_record="$(printf '%s\n%s' "$DOTFILES_REPO" "${DOTFILES_REF:-main}")"
+    if [ "$(cat "$state_dir/repo" 2>/dev/null || true)" != "$repo_record" ]; then
+      printf '%s\n' "$repo_record" >"$state_dir/repo"
+    fi
   fi
 fi
 

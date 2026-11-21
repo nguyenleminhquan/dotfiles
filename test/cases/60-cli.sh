@@ -1,0 +1,263 @@
+# The `dotfiles` command: profile, doctor, update and uninstall.
+# Doctor is checked against a real install of the profile, with stub binaries
+# standing in for the mise tools (the downloads are covered by
+# 50-server-tools.sh); update and uninstall run in throwaway homes. Everything
+# works offline: file:// URLs replace GitHub.
+# SC2016: the snippets are meant to be expanded by the shell under test.
+# shellcheck disable=SC2016
+export DOTFILES_NO_TOOLS=1
+cfg=/src/config/mise/config.toml
+df="$HOME/.local/bin/dotfiles"
+
+bash /src/install.sh --profile "$DF_PROFILE" >/dev/null 2>&1
+assert_ok "install linked the dotfiles command" -- test -x "$df"
+
+fx="$(mktemp -d)"
+git_ok=0
+if command -v git >/dev/null 2>&1; then git_ok=1; fi
+
+# df_out <cmd...>: output of the command, whatever its exit status.
+# df_rc <cmd...>: its exit status only.
+df_out() { "$@" 2>&1 || true; }
+df_rc() {
+  local rc=0
+  "$@" >/dev/null 2>&1 || rc=$?
+  printf '%s' "$rc"
+}
+
+assert_ne() { [ "$1" != "$2" ] || _fail "$3"; }
+
+# --- case_profile ----------------------------------------------------------------------
+assert_eq "$("$df" profile)" "$DF_PROFILE" "dotfiles profile prints the installed profile"
+assert_eq "$(bash -lc 'command -v dotfiles')" "$df" "a login shell finds dotfiles"
+mkdir -p "$fx/empty-home"
+assert_eq "$(HOME="$fx/empty-home" df_rc /src/bin/dotfiles profile)" 1 "profile without an install exits 1"
+assert_ok "profile without an install explains itself" -- \
+  grep -qi 'not installed\|no saved profile' <<<"$(HOME="$fx/empty-home" df_out /src/bin/dotfiles profile)"
+
+# --- case_usage --------------------------------------------------------------------------
+assert_ne "$(df_rc "$df" bogus)" 0 "an unknown command fails"
+assert_ne "$(df_rc "$df")" 0 "no command fails"
+assert_ok "usage lists the commands" -- grep -q 'doctor' <<<"$(df_out "$df" bogus)"
+assert_eq "$(df_rc "$df" help)" 0 "help exits 0"
+
+# --- case_doctor ------------------------------------------------------------------------
+# What the doctor expects for the profile: the commands of the mise tools.
+tool_cmds=(starship fzf kubectl helm helmfile k9s argocd talosctl kubectx kubens jq yq fd rg bat
+  doggo xh grpcurl websocat step stern trip task sops age micro)
+assert_eq "${#tool_cmds[@]}" "$(grep -Ec '^"(aqua|github):' "$cfg")" "this test covers every tool in the config"
+(
+  # shellcheck source=/dev/null
+  . /src/lib/doctor.sh
+  assert_eq "$(_df_doctor_tools "$DF_PROFILE" | tr '\n' ' ')" \
+    "$(if [ "$DF_PROFILE" = minimal ]; then :; else printf '%s ' "${tool_cmds[@]}"; fi)" \
+    "doctor expects exactly the tools of the config for $DF_PROFILE"
+)
+
+stubs=()
+if [ "$DF_PROFILE" != minimal ]; then
+  for t in "${tool_cmds[@]}"; do
+    printf '#!/bin/sh\nexit 0\n' >"$HOME/.local/bin/$t"
+    chmod +x "$HOME/.local/bin/$t"
+    stubs+=("$HOME/.local/bin/$t")
+  done
+fi
+
+doctor_out="$(df_out "$df" doctor)"
+assert_eq "$(df_rc "$df" doctor)" 0 "doctor exits 0 on a healthy install"
+assert_eq "$(grep -Ecv '^(OK|WARN|FAIL) ' <<<"$doctor_out" || true)" 0 "every doctor line starts with OK, WARN or FAIL"
+assert_eq "$(grep -c '^FAIL' <<<"$doctor_out" || true)" 0 "a healthy install has no FAIL line"
+for what in 'bash -c' 'bash -lc' 'ssh-like bash' 'PATH order' 'profile'; do
+  assert_ok "doctor reports: $what" -- grep -q "^OK .*$what" <<<"$doctor_out"
+done
+
+# A package that is on this row is OK, one that is not is a WARN and never a FAIL.
+for p in git screen curl ssh openssl ping; do
+  if command -v "$p" >/dev/null 2>&1; then
+    assert_ok "package $p present is OK" -- grep -Eq "^OK +package: $p" <<<"$doctor_out"
+  else
+    assert_ok "package $p missing is a WARN" -- grep -Eq "^WARN +package: $p" <<<"$doctor_out"
+  fi
+done
+
+# Rootless ping depends on net.ipv4.ping_group_range (the file is replaced here).
+if [ "$(id -u)" != 0 ]; then
+  printf '1 0\n' >"$fx/range"
+  out="$(DF_PING_GROUP_RANGE_FILE="$fx/range" df_out "$df" doctor)"
+  assert_ok "a closed ping range is a WARN" -- grep -Eq '^WARN +rootless ping' <<<"$out"
+  assert_eq "$(DF_PING_GROUP_RANGE_FILE="$fx/range" df_rc "$df" doctor)" 0 "a closed ping range does not fail the doctor"
+  printf '0 2147483647\n' >"$fx/range"
+  out="$(DF_PING_GROUP_RANGE_FILE="$fx/range" df_out "$df" doctor)"
+  assert_ok "an open ping range is OK" -- grep -Eq '^OK +rootless ping' <<<"$out"
+fi
+
+# zsh: its startup time as information, or a note that it is not there.
+if command -v zsh >/dev/null 2>&1; then
+  assert_ok "doctor prints the zsh startup time" -- grep -Eq '^OK +zsh startup: [0-9]+ ms' <<<"$doctor_out"
+elif [ "$DF_PROFILE" = minimal ]; then
+  assert_ok "minimal without zsh is fine" -- grep -Eq '^OK +zsh' <<<"$doctor_out"
+else
+  assert_ok "server without zsh is a WARN" -- grep -Eq '^WARN +zsh' <<<"$doctor_out"
+fi
+
+if [ "$DF_PROFILE" = minimal ]; then
+  assert_ok "minimal expects no tools" -- grep -Eq '^OK +tools: none expected' <<<"$doctor_out"
+  assert_fail "minimal never looks at trip" -- grep -q 'trip' <<<"$doctor_out"
+else
+  assert_ok "all tools found" -- grep -Eq '^OK +tools: all [0-9]+ found' <<<"$doctor_out"
+  # trippy has no unprivileged mode on Linux: it needs CAP_NET_RAW.
+  if [ "$(id -u)" != 0 ]; then
+    assert_ok "trip needs CAP_NET_RAW" -- grep -Eq '^WARN +trip.*CAP_NET_RAW' <<<"$doctor_out"
+  fi
+  # A missing tool is a FAIL naming it; the others stay OK.
+  rm -f "$HOME/.local/bin/kubectl"
+  out="$(df_out "$df" doctor)"
+  assert_eq "$(df_rc "$df" doctor)" 1 "a missing tool fails the doctor"
+  assert_ok "the FAIL names the tool" -- grep -Eq '^FAIL +tool: kubectl' <<<"$out"
+  assert_eq "$(grep -c '^FAIL' <<<"$out")" 1 "only the missing tool fails"
+  printf '#!/bin/sh\nexit 0\n' >"$HOME/.local/bin/kubectl"
+  chmod +x "$HOME/.local/bin/kubectl"
+  assert_eq "$(df_rc "$df" doctor)" 0 "doctor passes again once the tool is back"
+fi
+
+# A line printed by a startup file breaks scripts and scp. ~/.bashrc.local only
+# runs in interactive shells, so it cannot; ~/.config/dotfiles/env.local is read
+# by every shell, so it can. The doctor looks at login and ssh-like sessions
+# (plain `bash -c` reads no file at all).
+assert_file_absent ~/.bashrc.local
+printf 'echo hi\n' >~/.bashrc.local
+assert_eq "$(df_rc "$df" doctor)" 0 "output from ~/.bashrc.local is interactive-only and does not fail the doctor"
+rm -f ~/.bashrc.local
+
+mkdir -p ~/.config/dotfiles
+printf 'echo hi\n' >~/.config/dotfiles/env.local
+out="$(df_out "$df" doctor)"
+assert_eq "$(df_rc "$df" doctor)" 1 "output from env.local fails the doctor"
+assert_ok "the FAIL line names the login shell" -- grep -Eq '^FAIL +bash -lc' <<<"$out"
+assert_ok "the FAIL line names the ssh-like shell" -- grep -Eq '^FAIL +ssh-like bash' <<<"$out"
+assert_ok "plain bash -c still passes" -- grep -Eq '^OK +bash -c' <<<"$out"
+# The same file can also put ~/.local/bin ahead of the system directories.
+printf 'PATH="$HOME/.local/bin:$PATH"\nexport PATH\n' >~/.config/dotfiles/env.local
+out="$(df_out "$df" doctor)"
+assert_eq "$(df_rc "$df" doctor)" 1 "a PATH with .local/bin before /usr/bin fails the doctor"
+assert_ok "the FAIL line names the PATH" -- grep -Eq '^FAIL +PATH order' <<<"$out"
+rm -f ~/.config/dotfiles/env.local
+assert_eq "$(df_rc "$df" doctor)" 0 "doctor passes again once env.local is gone"
+
+# Nothing installed: the doctor says so.
+assert_eq "$(HOME="$fx/empty-home" df_rc /src/bin/dotfiles doctor)" 1 "doctor without an install fails"
+assert_ok "doctor without an install names the profile" -- \
+  grep -Eq '^FAIL +profile' <<<"$(HOME="$fx/empty-home" df_out /src/bin/dotfiles doctor)"
+
+# The stubs were only for the doctor.
+if [ "${#stubs[@]}" -gt 0 ]; then rm -f "${stubs[@]}"; fi
+
+# --- case_update_from_src -----------------------------------------------------------------
+# /src is read-only for this user, so the "edited checkout" is a copy of it.
+work="$fx/work"
+mkdir -p "$work"
+cp -a /src/. "$work/"
+printf 'probe-1\n' >"$work/config/update-probe"
+assert_file_absent "$HOME/.dotfiles/config/update-probe"
+DOTFILES_SRC="$work" "$df" update >/dev/null 2>&1 || _fail "dotfiles update with DOTFILES_SRC failed"
+assert_eq "$(cat "$HOME/.dotfiles/config/update-probe")" "probe-1" "update copies the edited checkout into ~/.dotfiles"
+assert_eq "$("$df" profile)" "$DF_PROFILE" "update keeps the profile"
+assert_symlink "$HOME/.bashrc" "$HOME/.dotfiles/shell/bashrc"
+printf 'probe-2\n' >"$work/config/update-probe"
+DOTFILES_SRC="$work" "$df" update >/dev/null 2>&1 || _fail "second dotfiles update failed"
+assert_eq "$(cat "$HOME/.dotfiles/config/update-probe")" "probe-2" "a second update picks up the next change"
+assert_fail "a copy of the checkout has no .git" -- test -e "$HOME/.dotfiles/.git"
+
+# isoenv HOME=<throwaway home> <cmd...>: no inherited source or location.
+isoenv=(env -u DOTFILES_SRC -u DOTFILES_DIR -u DOTFILES_REPO -u DOTFILES_REF)
+
+# --- case_update_with_nothing_to_go_on ---------------------------------------------------
+mkdir -p "$fx/lone/.config/dotfiles"
+echo minimal >"$fx/lone/.config/dotfiles/profile"
+assert_eq "$(df_rc "${isoenv[@]}" HOME="$fx/lone" /src/bin/dotfiles update)" 1 "update without any source fails"
+assert_ok "update says where the code could come from" -- \
+  grep -q 'DOTFILES_SRC' <<<"$(df_out "${isoenv[@]}" HOME="$fx/lone" /src/bin/dotfiles update)"
+assert_eq "$(df_rc "${isoenv[@]}" HOME="$fx/empty-home" /src/bin/dotfiles update)" 1 "update without an install fails"
+
+# --- case_update_from_git ---------------------------------------------------------------
+if [ "$git_ok" = 1 ]; then
+  origin="$fx/origin"
+  mkdir -p "$origin"
+  cp -a /src/. "$origin/"
+  rm -rf "$origin/.git"
+  g() { git -C "$origin" -c user.name=test -c user.email=test@example.invalid "$@"; }
+  g init -q
+  g symbolic-ref HEAD refs/heads/main
+  g add -A
+  g commit -q -m "initial"
+  gh="$fx/git-home"
+  mkdir -p "$gh"
+  "${isoenv[@]}" HOME="$gh" DOTFILES_REPO="file://$origin" DOTFILES_REF=main bash /src/install.sh --profile "$DF_PROFILE" >/dev/null 2>&1 ||
+    _fail "install from a git repo failed"
+  assert_ok "the install is a git clone" -- test -d "$gh/.dotfiles/.git"
+  assert_eq "$(cat "$gh/.config/dotfiles/repo")" "$(printf 'file://%s\nmain' "$origin")" "install records the repo and ref it cloned"
+  printf 'git-1\n' >"$origin/config/update-probe"
+  g add -A
+  g commit -q -m "probe"
+  "${isoenv[@]}" HOME="$gh" "$gh/.local/bin/dotfiles" update >/dev/null 2>&1 || _fail "dotfiles update from a git clone failed"
+  assert_eq "$(cat "$gh/.dotfiles/config/update-probe")" "git-1" "update pulls the new commit"
+  assert_eq "$("$gh/.local/bin/dotfiles" profile)" "$DF_PROFILE" "update from git keeps the profile"
+  # A history that cannot fast-forward is reported, not forced.
+  g commit -q --amend -m "rewritten"
+  assert_eq "$(df_rc "${isoenv[@]}" HOME="$gh" "$gh/.local/bin/dotfiles" update)" 1 "update refuses a history that is not a fast-forward"
+fi
+
+# --- case_update_from_tarball ------------------------------------------------------------
+# The repo recorded at install time is downloaded as a tarball. curl reads
+# file:// URLs, so a directory tree stands in for GitHub.
+srv="$fx/srv"
+mkpack() { # <probe content>: rebuild $srv/archive/main.tar.gz from the checkout copy
+  rm -rf "$fx/pack"
+  mkdir -p "$fx/pack/dotfiles-main" "$srv/archive"
+  cp -a /src/. "$fx/pack/dotfiles-main/"
+  rm -rf "$fx/pack/dotfiles-main/.git"
+  printf '%s\n' "$1" >"$fx/pack/dotfiles-main/config/update-probe"
+  tar -czf "$srv/archive/main.tar.gz" -C "$fx/pack" dotfiles-main
+}
+mkpack tar-1
+th="$fx/tar-home"
+mkdir -p "$th"
+if [ "$git_ok" = 0 ]; then
+  # No git here: the installer itself takes the tarball and has to record where from.
+  "${isoenv[@]}" HOME="$th" DOTFILES_REPO="file://$srv" DOTFILES_REF=main bash /src/install.sh --profile "$DF_PROFILE" >/dev/null 2>&1 ||
+    _fail "install from a tarball failed"
+  assert_eq "$(cat "$th/.config/dotfiles/repo")" "$(printf 'file://%s\nmain' "$srv")" "install records the repo and ref it downloaded"
+  assert_eq "$(cat "$th/.dotfiles/config/update-probe")" "tar-1" "the tarball install has the probe"
+else
+  "${isoenv[@]}" HOME="$th" DOTFILES_SRC=/src bash /src/install.sh --profile "$DF_PROFILE" >/dev/null 2>&1 ||
+    _fail "install for the tarball update failed"
+  assert_file_absent "$th/.config/dotfiles/repo"
+  printf 'file://%s\nmain\n' "$srv" >"$th/.config/dotfiles/repo"
+fi
+mkpack tar-2
+mkdir -p "$fx/tmp"
+"${isoenv[@]}" HOME="$th" TMPDIR="$fx/tmp" "$th/.local/bin/dotfiles" update >/dev/null 2>&1 || _fail "dotfiles update from a tarball failed"
+assert_eq "$(cat "$th/.dotfiles/config/update-probe")" "tar-2" "update downloads the recorded repo"
+assert_eq "$(ls -A "$fx/tmp")" "" "update cleans up its temporary directory"
+assert_eq "$("$th/.local/bin/dotfiles" profile)" "$DF_PROFILE" "update from a tarball keeps the profile"
+# A failed download leaves the install as it was.
+rm -f "$srv/archive/main.tar.gz"
+assert_eq "$(df_rc "${isoenv[@]}" HOME="$th" TMPDIR="$fx/tmp" "$th/.local/bin/dotfiles" update)" 1 "update fails when the download fails"
+assert_eq "$(cat "$th/.dotfiles/config/update-probe")" "tar-2" "a failed update leaves the install alone"
+assert_eq "$(ls -A "$fx/tmp")" "" "a failed update cleans up too"
+
+# --- case_uninstall ------------------------------------------------------------------------
+"${isoenv[@]}" HOME="$th" "$th/.local/bin/dotfiles" uninstall --purge >/dev/null 2>&1 || _fail "dotfiles uninstall --purge failed"
+assert_file_absent "$th/.dotfiles"
+assert_file_absent "$th/.local/bin/dotfiles"
+assert_file_absent "$th/.bashrc"
+assert_file_absent "$th/.config/dotfiles"
+assert_file_absent "$th/.config/dotfiles/repo"
+# Without --purge the checkout stays.
+mkdir -p "$fx/un-home"
+"${isoenv[@]}" HOME="$fx/un-home" DOTFILES_SRC=/src bash /src/install.sh --profile minimal >/dev/null 2>&1
+"${isoenv[@]}" HOME="$fx/un-home" "$fx/un-home/.local/bin/dotfiles" uninstall >/dev/null 2>&1 || _fail "dotfiles uninstall failed"
+assert_file_absent "$fx/un-home/.bashrc"
+assert_ok "uninstall without --purge keeps the checkout" -- test -f "$fx/un-home/.dotfiles/install.sh"
+
+rm -rf "$fx"
