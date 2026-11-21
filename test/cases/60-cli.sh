@@ -40,28 +40,50 @@ assert_ne "$(df_rc "$df" bogus)" 0 "an unknown command fails"
 assert_ne "$(df_rc "$df")" 0 "no command fails"
 assert_ok "usage lists the commands" -- grep -q 'doctor' <<<"$(df_out "$df" bogus)"
 assert_eq "$(df_rc "$df" help)" 0 "help exits 0"
+for flag in help -h --help; do
+  assert_eq "$("$df" "$flag" 2>/dev/null | head -n 1)" "usage: dotfiles <command>" "$flag prints the usage on stdout"
+  assert_eq "$("$df" "$flag" 2>&1 >/dev/null)" "" "$flag prints nothing on stderr"
+  assert_eq "$(df_rc "$df" "$flag")" 0 "$flag exits 0"
+done
+assert_eq "$("$df" bogus 2>/dev/null)" "" "bad usage prints nothing on stdout"
+assert_ok "bad usage prints the usage on stderr" -- grep -q "^usage: dotfiles" <<<"$(df_out "$df" bogus)"
 
 # --- case_doctor ------------------------------------------------------------------------
-# What the doctor expects for the profile: the commands of the mise tools.
-tool_cmds=(starship fzf kubectl helm helmfile k9s argocd talosctl kubectx kubens jq yq fd rg bat
-  doggo xh grpcurl websocat step stern trip task sops age micro)
-assert_eq "${#tool_cmds[@]}" "$(grep -Ec '^"(aqua|github):' "$cfg")" "this test covers every tool in the config"
+# What the doctor expects: the commands in config/mise/commands.*, one line per
+# mise tool ("<command> <mise key>"). The files and the mise configs must list
+# the same tools, so a swapped tool cannot leave the doctor failing every install.
+# cmds_of <file>: the commands; keys_of <file>: the mise keys; both ignore comments.
+cmds_of() { awk '{ sub(/#.*/, "") } NF { print $1 }' "$1"; }
+keys_of() { awk '{ sub(/#.*/, "") } NF { print $2 }' "$1" | LC_ALL=C sort; }
+toml_keys() { grep -E '^"(aqua|github):' "$1" | cut -d'"' -f2 | LC_ALL=C sort; }
+assert_eq "$(keys_of /src/config/mise/commands.server)" "$(toml_keys "$cfg")" \
+  "commands.server lists exactly the tools of config.toml"
+assert_eq "$(keys_of /src/config/mise/commands.workstation)" "$(toml_keys /src/config/mise/config.workstation.toml)" \
+  "commands.workstation lists exactly the tools of config.workstation.toml"
+assert_eq "$(cmds_of /src/config/mise/commands.server | sort | uniq -d)" "" "no command is listed twice"
+assert_ne "$(cmds_of /src/config/mise/commands.server | wc -l | tr -d ' ')" 0 "commands.server is not empty"
+tool_cmds=()
+if [ "$DF_PROFILE" != minimal ]; then
+  mapfile -t tool_cmds < <(cmds_of /src/config/mise/commands.server)
+fi
 (
   # shellcheck source=/dev/null
   . /src/lib/doctor.sh
-  assert_eq "$(_df_doctor_tools "$DF_PROFILE" | tr '\n' ' ')" \
-    "$(if [ "$DF_PROFILE" = minimal ]; then :; else printf '%s ' "${tool_cmds[@]}"; fi)" \
-    "doctor expects exactly the tools of the config for $DF_PROFILE"
+  assert_eq "$(_df_doctor_tools "$DF_PROFILE" | paste -sd ' ' -)" "${tool_cmds[*]-}" \
+    "doctor expects exactly the commands in the files for $DF_PROFILE"
+  # The workstation profile adds its own file to the server one.
+  assert_eq "$(_df_doctor_tools workstation | wc -l | tr -d ' ')" \
+    "$(($(cmds_of /src/config/mise/commands.server | wc -l) + $(cmds_of /src/config/mise/commands.workstation | wc -l)))" \
+    "workstation checks the server and the workstation commands"
+  assert_eq "$(_df_doctor_tools minimal)" "" "minimal expects no tools"
 )
 
 stubs=()
-if [ "$DF_PROFILE" != minimal ]; then
-  for t in "${tool_cmds[@]}"; do
-    printf '#!/bin/sh\nexit 0\n' >"$HOME/.local/bin/$t"
-    chmod +x "$HOME/.local/bin/$t"
-    stubs+=("$HOME/.local/bin/$t")
-  done
-fi
+for t in ${tool_cmds[@]+"${tool_cmds[@]}"}; do
+  printf '#!/bin/sh\nexit 0\n' >"$HOME/.local/bin/$t"
+  chmod +x "$HOME/.local/bin/$t"
+  stubs+=("$HOME/.local/bin/$t")
+done
 
 doctor_out="$(df_out "$df" doctor)"
 assert_eq "$(df_rc "$df" doctor)" 0 "doctor exits 0 on a healthy install"
@@ -235,16 +257,19 @@ else
   printf 'file://%s\nmain\n' "$srv" >"$th/.config/dotfiles/repo"
 fi
 mkpack tar-2
+# TMPDIR points at a directory that must stay empty: nothing may be written outside $HOME.
 mkdir -p "$fx/tmp"
 "${isoenv[@]}" HOME="$th" TMPDIR="$fx/tmp" "$th/.local/bin/dotfiles" update >/dev/null 2>&1 || _fail "dotfiles update from a tarball failed"
 assert_eq "$(cat "$th/.dotfiles/config/update-probe")" "tar-2" "update downloads the recorded repo"
-assert_eq "$(ls -A "$fx/tmp")" "" "update cleans up its temporary directory"
+assert_eq "$(ls -A "$fx/tmp")" "" "update writes nothing outside HOME"
+assert_fail "update cleans up its temporary directory under HOME" -- compgen -G "$th/.cache/dotfiles-update.*"
 assert_eq "$("$th/.local/bin/dotfiles" profile)" "$DF_PROFILE" "update from a tarball keeps the profile"
 # A failed download leaves the install as it was.
 rm -f "$srv/archive/main.tar.gz"
 assert_eq "$(df_rc "${isoenv[@]}" HOME="$th" TMPDIR="$fx/tmp" "$th/.local/bin/dotfiles" update)" 1 "update fails when the download fails"
 assert_eq "$(cat "$th/.dotfiles/config/update-probe")" "tar-2" "a failed update leaves the install alone"
-assert_eq "$(ls -A "$fx/tmp")" "" "a failed update cleans up too"
+assert_eq "$(ls -A "$fx/tmp")" "" "a failed update writes nothing outside HOME"
+assert_fail "a failed update cleans up too" -- compgen -G "$th/.cache/dotfiles-update.*"
 
 # --- case_uninstall ------------------------------------------------------------------------
 "${isoenv[@]}" HOME="$th" "$th/.local/bin/dotfiles" uninstall --purge >/dev/null 2>&1 || _fail "dotfiles uninstall --purge failed"

@@ -21,17 +21,20 @@ _df_doc_fail() {
   DF_DOCTOR_FAILS=$((DF_DOCTOR_FAILS + 1))
 }
 
-# _df_doctor_tools <profile>: the commands the profile's mise tools provide,
-# one per line (the command, not the mise name: trippy is `trip`). The server
-# list is config/mise/config.toml; the workstation profile has no extra tools
-# yet, so add them here when config.workstation.toml gets some.
+# _df_doctor_tools <profile>: the commands the profile's mise tools provide, one
+# per line (the command, not the mise name: trippy is `trip`). They come from
+# config/mise/commands.<profile> next to the mise configs: minimal has none,
+# server the server file, workstation the server file and its own.
 _df_doctor_tools() {
+  local dir="$_df_doctor_root/config/mise" file
+  local -a files=()
   case "$1" in
-    server | workstation)
-      printf '%s\n' starship fzf kubectl helm helmfile k9s argocd talosctl kubectx kubens \
-        jq yq fd rg bat doggo xh grpcurl websocat step stern trip task sops age micro
-      ;;
+    server) files=(server) ;;
+    workstation) files=(server workstation) ;;
   esac
+  for file in ${files[@]+"${files[@]}"}; do
+    awk '{ sub(/#.*/, "") } NF { print $1 }' "$dir/commands.$file"
+  done
 }
 
 # Packages the dotfiles lean on but do not install: their absence is a WARN.
@@ -100,7 +103,11 @@ _df_doctor_check_tools() {
   local -a tools=()
   mapfile -t tools < <(_df_doctor_tools "$profile")
   if [ "${#tools[@]}" -eq 0 ]; then
-    _df_doc_ok "tools: none expected for $profile"
+    if [ "$profile" = minimal ]; then
+      _df_doc_ok "tools: none expected for $profile"
+    else
+      _df_doc_fail "tools: no command list for $profile in $_df_doctor_root/config/mise (broken checkout)"
+    fi
     return 0
   fi
   out="$(_df_doctor_clean -lc "$_DF_DOCTOR_SCAN" _ "${tools[@]}")" || :

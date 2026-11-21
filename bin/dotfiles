@@ -18,7 +18,7 @@ die() {
 }
 
 usage() {
-  cat >&2 <<'EOF'
+  cat <<'EOF'
 usage: dotfiles <command>
 
 commands:
@@ -53,7 +53,8 @@ saved_profile() {
 #   1. $DOTFILES_SRC, a local checkout that install.sh mirrors into $DOTFILES_DIR
 #   2. $DOTFILES_DIR is a git clone: fast-forward it, install in place
 #   3. the repo install.sh recorded (~/.config/dotfiles/repo: URL, then ref):
-#      its tarball is unpacked in a temporary directory and installed from there
+#      its tarball is unpacked in a temporary directory under ~/.cache and
+#      installed from there
 cmd_update() {
   local profile repo ref
   profile="$(saved_profile)"
@@ -70,8 +71,10 @@ cmd_update() {
     ref="${ref:-main}"
     command -v curl >/dev/null 2>&1 || die "curl is required to download the update"
     command -v tar >/dev/null 2>&1 || die "tar is required to unpack the update"
-    # Global, so that the EXIT trap still sees it after this function has returned.
-    update_tmp="$(mktemp -d)"
+    # Under $HOME (nothing is written outside it), and global so that the EXIT
+    # trap still sees it after this function has returned.
+    mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}"
+    update_tmp="$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/dotfiles-update.XXXXXX")"
     trap 'rm -rf "$update_tmp"' EXIT
     curl -fsSL "${repo%.git}/archive/$ref.tar.gz" | tar -xz --strip-components=1 -C "$update_tmp" ||
       die "could not download ${repo%.git} ($ref)"
@@ -106,7 +109,7 @@ main() {
       exit 0
       ;;
     *)
-      usage
+      usage >&2
       exit 1
       ;;
   esac

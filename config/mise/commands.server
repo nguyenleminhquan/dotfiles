@@ -1,0 +1,30 @@
+# The command each tool in config.toml provides, for `dotfiles doctor`:
+#   <command> <mise key exactly as written in config.toml>
+# Blank lines and # comments are ignored. test/cases/60-cli.sh fails when this
+# file and config.toml list different tools, so change both together.
+starship github:starship/starship
+fzf aqua:junegunn/fzf
+kubectl aqua:kubernetes/kubernetes/kubectl
+helm aqua:helm/helm
+helmfile aqua:helmfile/helmfile
+k9s aqua:derailed/k9s
+argocd aqua:argoproj/argo-cd
+talosctl aqua:siderolabs/talos
+kubectx aqua:ahmetb/kubectx
+kubens aqua:ahmetb/kubectx/kubens
+jq aqua:jqlang/jq
+yq aqua:mikefarah/yq
+fd github:sharkdp/fd
+rg aqua:BurntSushi/ripgrep
+bat github:sharkdp/bat
+doggo aqua:mr-karan/doggo
+xh aqua:ducaale/xh
+grpcurl aqua:fullstorydev/grpcurl
+websocat aqua:vi/websocat
+step aqua:smallstep/cli
+stern aqua:stern/stern
+trip github:fujiapple852/trippy
+task aqua:go-task/task
+sops aqua:getsops/sops
+age aqua:FiloSottile/age
+micro aqua:micro-editor/micro

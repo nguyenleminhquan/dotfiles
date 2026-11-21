@@ -332,6 +332,14 @@ median="$(printf '%s\n' "${times[@]}" | sort -n | sed -n 5p)"
 printf 'zsh -i startup ms: %s (median %s)\n' "${times[*]}" "$median" >&2
 assert_ok "zsh startup median ${median}ms < 300ms" -- test "$median" -lt 300
 
+# case_doctor_finds_the_real_tools: the doctor's command list (config/mise/commands.*)
+# against what mise really installed. Only the tool lines are asserted here: the
+# other checks depend on the host (packages, ping, zsh) and are covered by 60-cli.sh.
+doctor_out="$("$HOME/.local/bin/dotfiles" doctor 2>&1 || true)"
+echo "$doctor_out" >&2
+assert_ok "doctor reports the tools" -- grep -Eq '^OK +tools: all [0-9]+ found' <<<"$doctor_out"
+assert_eq "$(grep -c '^FAIL +tool' <<<"$doctor_out" || true)" 0 "doctor finds every real tool"
+
 # --- case_purge_removes_what_was_installed ------------------------------------------
 # Running the tools above made state of their own (k9s state, starship cache);
 # that is the user's, not the installer's, and the test clears it so the listing
