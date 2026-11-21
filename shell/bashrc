@@ -1,23 +1,69 @@
 # shellcheck shell=bash
 # Read by interactive bash and by `ssh host cmd`, so everything before the
 # interactive guard must be silent and cheap.
-if [ -r "${DOTFILES_DIR:-$HOME/.dotfiles}/shell/env.sh" ]; then
-  # shellcheck source=/dev/null
-  . "${DOTFILES_DIR:-$HOME/.dotfiles}/shell/env.sh"
+# Where the checkout lives: the environment wins, then the location the
+# installer recorded (needed for a non-default DOTFILES_DIR), then ~/.dotfiles.
+if [ -z "${DOTFILES_DIR:-}" ]; then
+  if [ -r "$HOME/.config/dotfiles/dir" ]; then
+    read -r DOTFILES_DIR <"$HOME/.config/dotfiles/dir" || :
+  fi
+  DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 fi
+if [ -r "$DOTFILES_DIR/shell/env.sh" ]; then
+  # shellcheck source=/dev/null
+  . "$DOTFILES_DIR/shell/env.sh"
+fi
+
 [[ $- == *i* ]] || return 0
+
+# bash sets $0 to the script name only after the startup files have run, so
+# `bash -i script.sh` is recognised from the kernel's view of our arguments.
+_df_has_script_arg() {
+  local -a argv
+  local i=1 a
+  [[ -r /proc/$$/cmdline ]] || return 1
+  mapfile -d '' -t argv </proc/$$/cmdline || return 1
+  while ((i < ${#argv[@]})); do
+    a=${argv[i]}
+    case $a in
+      -o | +o | -O | +O | --rcfile | --init-file) ((i += 2)) ;;
+      --) ((i + 1 < ${#argv[@]})) && return 0 || return 1 ;;
+      -* | +*) ((i += 1)) ;;
+      *) return 0 ;;
+    esac
+  done
+  return 1
+}
 
 # Hand an interactive session over to zsh when it is safe to do so:
 #  - stdin and stdout are terminals, so scripts and pipes keep bash
 #  - not in zsh already and not switched before (DOTFILES_IN_ZSH)
 #  - ~/.no-zsh is the opt-out
-#  - not `bash -i -c cmd`, because exec would drop the command
+#  - not `bash -i -c cmd` or `bash -i script`, because exec would drop them
 #  - zsh actually starts
 # The variable is set only for the new process, so a failed exec leaves no trace.
-if [[ -t 0 && -t 1 && -z ${DOTFILES_IN_ZSH:-} && -z ${BASH_EXECUTION_STRING:-} &&
-  ! -e "$HOME/.no-zsh" ]] && command -v zsh >/dev/null 2>&1 &&
-  zsh -c true >/dev/null 2>&1; then
-  DOTFILES_IN_ZSH=1 exec zsh
+# A login bash becomes a login zsh so that `logout` and login files still work.
+_df_can_switch_to_zsh() {
+  [[ -t 0 && -t 1 && -z ${DOTFILES_IN_ZSH:-} && -z ${BASH_EXECUTION_STRING:-} &&
+    (${0##*/} == bash || ${0##*/} == -bash) && ! -e "$HOME/.no-zsh" ]] || return 1
+  command -v zsh >/dev/null 2>&1 || return 1
+  ! _df_has_script_arg && zsh -c true >/dev/null 2>&1
+}
+if _df_can_switch_to_zsh; then
+  if shopt -q login_shell; then
+    DOTFILES_IN_ZSH=1 exec zsh -l
+  else
+    DOTFILES_IN_ZSH=1 exec zsh
+  fi
+fi
+unset -f _df_has_script_arg _df_can_switch_to_zsh
+
+# RHEL-family bash does not read /etc/bashrc by itself (their skeleton
+# ~/.bashrc did), so do it once per shell. DF_ETC_BASHRC overrides the path.
+if [[ -z ${_df_etc_bashrc_done:-} && -r ${DF_ETC_BASHRC:-/etc/bashrc} ]]; then
+  _df_etc_bashrc_done=1
+  # shellcheck source=/dev/null
+  . "${DF_ETC_BASHRC:-/etc/bashrc}"
 fi
 
 # Interactive pieces added by later tasks: aliases.sh, history.sh, prompt.

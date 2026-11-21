@@ -320,11 +320,15 @@ log_info "profile: $profile"
 df_link_profile "$profile"
 
 if [ "$dry_run" = 1 ]; then
-  log_info "would record profile in $state_dir/profile"
+  log_info "would record profile in $state_dir/profile and location in $state_dir/dir"
 else
   mkdir -p "$state_dir"
   if [ "$(cat "$state_dir/profile" 2>/dev/null || true)" != "$profile" ]; then
     printf '%s\n' "$profile" >"$state_dir/profile"
+  fi
+  # The shell startup files cannot find a non-default checkout on their own.
+  if [ "$(cat "$state_dir/dir" 2>/dev/null || true)" != "$DOTFILES_DIR" ]; then
+    printf '%s\n' "$DOTFILES_DIR" >"$state_dir/dir"
   fi
   log_info "installed profile '$profile'"
 fi

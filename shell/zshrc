@@ -1,4 +1,11 @@
 # shellcheck shell=bash
-# Minimal for now (the full interactive setup comes later). The export stops
-# a bash started from inside zsh from switching back to zsh.
+# Minimal for now (the full interactive setup comes later).
+
+# Stops a bash started from inside zsh from switching back to zsh.
 export DOTFILES_IN_ZSH=1
+
+# After `exec zsh` from bash, SHELL still names bash, so screen/tmux windows
+# would start bash (which then sees DOTFILES_IN_ZSH and stays bash).
+if [[ ${SHELL:t} != zsh && -n ${commands[zsh]:-} ]]; then
+  export SHELL="${commands[zsh]}"
+fi

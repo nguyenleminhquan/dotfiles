@@ -1,6 +1,14 @@
 # shellcheck shell=sh
 # Login shells. May be read by /bin/sh, so keep it POSIX and silent.
-if [ -r "${DOTFILES_DIR:-$HOME/.dotfiles}/shell/env.sh" ]; then
+# Where the checkout lives: the environment wins, then the location the
+# installer recorded (needed for a non-default DOTFILES_DIR), then ~/.dotfiles.
+if [ -z "${DOTFILES_DIR:-}" ]; then
+  if [ -r "$HOME/.config/dotfiles/dir" ]; then
+    read -r DOTFILES_DIR <"$HOME/.config/dotfiles/dir" || :
+  fi
+  DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+fi
+if [ -r "$DOTFILES_DIR/shell/env.sh" ]; then
   # shellcheck source=/dev/null
-  . "${DOTFILES_DIR:-$HOME/.dotfiles}/shell/env.sh"
+  . "$DOTFILES_DIR/shell/env.sh"
 fi

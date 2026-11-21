@@ -6,14 +6,28 @@
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 export DOTFILES_DIR
 
-# _df_path_add front|back <dir>: put <dir> on PATH unless it is already there.
+# _df_path_add front|back <dir>: put <dir> on PATH exactly once. "front" also
+# moves an entry that is already there (an interactive shell started from a
+# non-interactive one inherits it at the back).
 _df_path_add() {
   case ":$PATH:" in
-    *":$2:"*) return 0 ;;
+    *":$2:"*)
+      [ "$1" = front ] || return 0
+      _df_rest=":$PATH:"
+      while :; do
+        case "$_df_rest" in
+          *":$2:"*) _df_rest="${_df_rest%%":$2:"*}:${_df_rest#*":$2:"}" ;;
+          *) break ;;
+        esac
+      done
+      _df_rest="${_df_rest#:}"
+      PATH="${_df_rest%:}"
+      unset _df_rest
+      ;;
   esac
   case "$1" in
-    front) PATH="$2:$PATH" ;;
-    *) PATH="$PATH:$2" ;;
+    front) PATH="$2${PATH:+:$PATH}" ;;
+    *) PATH="${PATH:+$PATH:}$2" ;;
   esac
   export PATH
 }
