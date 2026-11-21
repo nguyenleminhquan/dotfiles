@@ -158,7 +158,7 @@ assert_ok "big kubeconfig is at least 200 KB" -- test "$(wc -c <"$fx/big")" -ge 
 bigcfg="$fx/big"
 touch -d '5 seconds ago' "$fx/big"
 KUBECONFIG="$fx/big"
-render_ms() { # average ms over 10 renders; $1 = cache dir ("" for the default)
+render_ms() { # average ms over 10 renders; $1 = cache dir
   local t0 i
   t0=$(date +%s%N)
   for i in 1 2 3 4 5 6 7 8 9 10; do XDG_CACHE_HOME="$1" _df_kube_segment; done
@@ -167,27 +167,74 @@ render_ms() { # average ms over 10 renders; $1 = cache dir ("" for the default)
 rm -rf "$fx/cache"
 XDG_CACHE_HOME="$fx/cache" _df_kube_segment
 assert_eq "$_df_kube_label" "ctx55/ns55" "big kubeconfig: label"
-cached_ms=$(render_ms "$fx/cache")
-uncached_ms=$(render_ms "/nonexistent-cache-dir")
-printf '  big kubeconfig render: %s ms cached, %s ms uncached (average of 10)\n' "$cached_ms" "$uncached_ms"
-assert_ok "cached render < 50 ms on a 200 KB kubeconfig (was $cached_ms)" -- test "$cached_ms" -lt 50
-assert_ok "uncached render < 50 ms on a 200 KB kubeconfig (was $uncached_ms)" -- test "$uncached_ms" -lt 50
-# the cache avoids rescanning, and an edit is noticed at once
-mkdir "$fx/bin"
-printf '#!/bin/sh\necho x >>"%s/awk-count"\nexec "%s" "$@"\n' "$fx" "$(command -v awk)" >"$fx/bin/awk"; chmod +x "$fx/bin/awk"
-rm -rf "$fx/cache"
-for _ in 1 2 3 4 5 6; do PATH="$fx/bin:$PATH" XDG_CACHE_HOME="$fx/cache" _df_kube_segment; done
-assert_eq "$(wc -l <"$fx/awk-count" | tr -d ' ')" "1" "unchanged kubeconfig is scanned once, then served from the cache"
+render_ms_value=$(render_ms "$fx/cache")
+printf '  big kubeconfig render in bash: %s ms (average of 10)\n' "$render_ms_value"
+assert_ok "bash render < 50 ms on a 200 KB kubeconfig (was $render_ms_value)" -- test "$render_ms_value" -lt 50
 sed -i 's/^current-context: ctx55$/current-context: ctx7-prod/' "$fx/big"
-PATH="$fx/bin:$PATH" XDG_CACHE_HOME="$fx/cache" _df_kube_segment
-assert_eq "$_df_kube_label|$_df_kube_prod" "ctx7-prod/default|1" "an edited kubeconfig is rescanned"
-assert_eq "$(wc -l <"$fx/awk-count" | tr -d ' ')" "2" "exactly one more scan after the edit"
-KUBECONFIG="$fx/big:$fx/other"
-printf 'current-context: ctx9\n' >"$fx/other"
-touch -d '5 seconds ago' "$fx/big" "$fx/other"
-PATH="$fx/bin:$PATH" XDG_CACHE_HOME="$fx/cache" _df_kube_segment
-assert_eq "$_df_kube_label" "ctx7-prod/default" "cache is keyed on the file list too"
-rm -f "$fx/other"
+XDG_CACHE_HOME="$fx/cache" _df_kube_segment
+assert_eq "$_df_kube_label|$_df_kube_prod" "ctx7-prod/default|1" "an edited kubeconfig is picked up"
+
+# Replacing a kubeconfig must always be noticed, also by something OLDER than
+# the cache (cp -p, mv, rsync -t, tar x, a symlink swap): the prod red must
+# never be lost. Same script in bash and zsh; zsh additionally caches.
+cat >"$fx/identity.sh" <<'EOF'
+. /src/shell/prompt-minimal.sh
+d="$1"; mkdir -p "$d"
+export XDG_CACHE_HOME="$d/cache" KUBECONFIG="$d/config"
+show() { _df_kube_segment; printf '%s=%s|%s\n' "$1" "$_df_kube_label" "$_df_kube_prod"; }
+printf 'current-context: staging\n' >"$d/a"; touch -d '1 hour ago' "$d/a"
+printf 'current-context: really-prod\n' >"$d/b"; touch -d '2 hours ago' "$d/b"
+printf 'current-context: dev\n' >"$d/c"; touch -d '3 hours ago' "$d/c"
+cp -p "$d/a" "$d/config"; show start
+show again
+cp -p "$d/b" "$d/config"; show cp_p_older_in_place
+cp -p "$d/c" "$d/config"; show cp_p_dev
+mv "$d/b" "$d/config"; show mv_older_file
+cp -p "$d/c" "$d/config"; show back_to_dev
+rm -f "$d/config"; ln -s "$d/c" "$d/config"; show link_dev
+printf 'current-context: really-prod\n' >"$d/b2"; touch -d '4 hours ago' "$d/b2"
+ln -sfn "$d/b2" "$d/config"; show link_swapped_to_prod
+ln -sfn "$d/c" "$d/config"; show link_swapped_back
+EOF
+want_identity="start=staging/default|0
+again=staging/default|0
+cp_p_older_in_place=really-prod/default|1
+cp_p_dev=dev/default|0
+mv_older_file=really-prod/default|1
+back_to_dev=dev/default|0
+link_dev=dev/default|0
+link_swapped_to_prod=really-prod/default|1
+link_swapped_back=dev/default|0"
+assert_eq "$(bash "$fx/identity.sh" "$fx/id-bash")" "$want_identity" "bash: replaced or re-linked kubeconfigs are noticed"
+
+# the zsh cache: no rescans while nothing changes, a rescan after an edit or a
+# different file list
+cat >"$fx/cache.zsh" <<'EOF'
+. /src/shell/prompt-minimal.sh
+fx="$1"
+export XDG_CACHE_HOME="$fx/zcache" KUBECONFIG="$fx/big"
+PATH="$fx/bin:$PATH"
+scans() { wc -l <"$fx/awk-count" | tr -d ' '; }
+for i in 1 2 3 4 5 6; do _df_kube_segment; done
+print "scans_after_6_renders=$(scans) label=$_df_kube_label"
+sed -i 's/^current-context: ctx7-prod$/current-context: ctx8-prod/' "$fx/big"
+_df_kube_segment
+print "scans_after_edit=$(scans) label=$_df_kube_label"
+printf 'current-context: ctx9\n' >"$fx/other"; touch -d '5 seconds ago' "$fx/other" "$fx/big"
+KUBECONFIG="$fx/other:$fx/big"
+_df_kube_segment
+print "different_file_list=$_df_kube_label"
+EOF
+if [ "$has_zsh" = 1 ]; then
+  mkdir "$fx/bin"
+  printf '#!/bin/sh\necho x >>"%s/awk-count"\nexec "%s" "$@"\n' "$fx" "$(command -v awk)" >"$fx/bin/awk"; chmod +x "$fx/bin/awk"
+  rm -f "$fx/awk-count"; : >"$fx/awk-count"
+  touch -d '5 seconds ago' "$fx/big"
+  assert_eq "$(zsh -f "$fx/cache.zsh" "$fx")" "scans_after_6_renders=1 label=ctx7-prod/default
+scans_after_edit=2 label=ctx8-prod/default
+different_file_list=ctx9/ns9" "zsh: unchanged kubeconfig is scanned once; an edit or a different file list rescans"
+  assert_eq "$(zsh -f "$fx/identity.sh" "$fx/id-zsh")" "$want_identity" "zsh: replaced or re-linked kubeconfigs are noticed"
+fi
 rm -rf "$HOME/.kube" "$HOME/.cache/dotfiles"; unset KUBECONFIG
 
 # $? survives the hooks, and PROMPT_COMMAND joins stay valid
@@ -232,7 +279,7 @@ assert_fail "repo git config sets no core.editor (prod hosts have no micro)" -- 
 # writes never land in the tracked file of the repo.
 gitglobal="$HOME/.config/git/config"
 assert_ok "~/.config/git/config is a regular file, not a link" -- test -f "$gitglobal" -a ! -L "$gitglobal"
-assert_ok "generated git config includes the repo settings" -- grep -Eq "^[[:space:]]*path[[:space:]]*=[[:space:]]*$HOME/\.dotfiles/config/git/config\$" "$gitglobal"
+assert_ok "generated git config includes the repo settings (quoted, marked)" -- grep -qxF "$(printf '	path = "%s" # dotfiles:repo' "$HOME/.dotfiles/config/git/config")" "$gitglobal"
 assert_ok "generated git config includes the local identity file" -- grep -Eq '^[[:space:]]*path[[:space:]]*=[[:space:]]*~/\.gitconfig\.local$' "$gitglobal"
 assert_eq "$(grep -c -v -E '^(#|\[include\]|[[:space:]]*path = )' "$gitglobal" || true)" "0" "generated git config has nothing but the two includes"
 if [ "$has_git" = 1 ]; then

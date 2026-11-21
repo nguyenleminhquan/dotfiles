@@ -8,8 +8,11 @@
 #
 # Cost: kubeconfigs can be large (certificate data comes before
 # current-context) and zsh reads a file one byte at a time, so the files are
-# never read with a shell loop. One awk pass reads them in blocks, and the
-# result is cached in ~/.cache/dotfiles/kube-prompt until a file changes.
+# never read with a shell loop. One awk pass reads them in blocks. In zsh the
+# result is also cached in ~/.cache/dotfiles/kube-prompt, keyed on the identity
+# of the files (see _df_kube_identity), so an unchanged setup costs no fork.
+# Bash has no fork-free stat, and a stat per prompt would cost as much as the
+# awk pass itself, so it scans every time.
 
 # _df_kube_list: set _df_kube_key to the colon-separated list of kubeconfig
 # files that exist ($KUBECONFIG, or ~/.kube/config when it is empty). No forks.
@@ -123,39 +126,69 @@ df_kube_is_prod() {
   [[ ${1:-} =~ $re ]]
 }
 
+# _df_kube_identity: set _df_kube_ident to what identifies the content behind
+# every file in _df_kube_key: device, inode, size, mtime, ctime and the
+# symlink target. Replacing a file (mv, cp -p, rsync -t, tar x, a symlink
+# swap) changes it even when the new file is older. Needs zsh's zstat builtin,
+# which stats without forking; fails where that is missing (bash), and then
+# nothing is cached.
+_df_kube_identity() {
+  local f rest="$_df_kube_key:" tgt
+  local -A h
+  _df_kube_ident=''
+  [[ -n ${_df_have_zstat:-} ]] || return 1
+  while [[ -n $rest ]]; do
+    f="${rest%%:*}"
+    rest="${rest#*:}"
+    h=()
+    zstat -H h -- "$f" 2>/dev/null || return 1
+    _df_kube_ident+="$f=${h[device]},${h[inode]},${h[size]},${h[mtime]},${h[ctime]}"
+    h=()
+    tgt=''
+    zstat -L -H h -- "$f" 2>/dev/null && tgt="${h[link]}"
+    _df_kube_ident+="@$tgt;"
+  done
+}
+
 # _df_kube_segment: set _df_kube_label ("context/namespace", or empty when
 # there is no kubeconfig) and _df_kube_prod (1 or 0). Characters outside a
 # conservative set become "?" so a hostile context name cannot inject escape
 # sequences or expansions into the prompt.
 _df_kube_segment() {
-  local ctx='' ns='' out dir cache key='' f fresh=0
+  local ctx='' ns='' out dir cache key='' f fresh=0 rest cached=0
   _df_kube_label=''
   _df_kube_prod=0
   _df_kube_list
   [[ -n $_df_kube_key ]] || return 0
 
-  dir="${XDG_CACHE_HOME:-$HOME/.cache}/dotfiles"
-  cache="$dir/kube-prompt"
-  # Cache: line 1 the file list, line 2 the context, line 3 the namespace. It
-  # holds while every file is strictly older than the cache file (an edit in
-  # the same second as the cache write therefore counts as a change).
-  if [[ -f $cache ]] && { IFS= read -r key && IFS= read -r ctx && IFS= read -r ns; } <"$cache" 2>/dev/null &&
-    [[ $key == "$_df_kube_key" && -n $ns ]]; then
-    fresh=1
-    local rest="$_df_kube_key:"
-    while [[ -n $rest ]]; do
-      f="${rest%%:*}"
-      rest="${rest#*:}"
-      [[ $f -ot $cache ]] || { fresh=0; break; }
-    done
+  if _df_kube_identity; then
+    cached=1
+    dir="${XDG_CACHE_HOME:-$HOME/.cache}/dotfiles"
+    cache="$dir/kube-prompt"
+    # Cache: line 1 file list and identity, line 2 the context, line 3 the
+    # namespace. It holds while the identity is unchanged and every file is
+    # strictly older than the cache file (an edit in the same second as the
+    # cache write therefore counts as a change).
+    if [[ -f $cache ]] && { IFS= read -r key && IFS= read -r ctx && IFS= read -r ns; } <"$cache" 2>/dev/null &&
+      [[ $key == "$_df_kube_ident" && -n $ns ]]; then
+      fresh=1
+      rest="$_df_kube_key:"
+      while [[ -n $rest ]]; do
+        f="${rest%%:*}"
+        rest="${rest#*:}"
+        [[ $f -ot $cache ]] || { fresh=0; break; }
+      done
+    fi
   fi
   if [[ $fresh == 0 ]]; then
     out="$(_df_kube_scan '')"
     ctx="${out%%$'\t'*}"
     ns="${out#*$'\t'}"
     ns="${ns:-default}"
-    [[ -d $dir ]] || mkdir -p "$dir" 2>/dev/null || :
-    { printf '%s\n%s\n%s\n' "$_df_kube_key" "$ctx" "$ns" >"$cache"; } 2>/dev/null || :
+    if [[ $cached == 1 ]]; then
+      [[ -d $dir ]] || mkdir -p "$dir" 2>/dev/null || :
+      { printf '%s\n%s\n%s\n' "$_df_kube_ident" "$ctx" "$ns" >"$cache"; } 2>/dev/null || :
+    fi
   fi
 
   [[ -n $ctx ]] || return 0
@@ -165,6 +198,11 @@ _df_kube_segment() {
   _df_kube_label="$ctx/$ns"
   return 0
 }
+
+# zsh: load the stat builtin once (no fork per prompt afterwards).
+if [[ -n ${ZSH_VERSION:-} ]] && zmodload -F zsh/stat b:zstat 2>/dev/null; then
+  _df_have_zstat=1
+fi
 
 if [[ -n ${ZSH_VERSION:-} ]]; then
   _df_prompt_precmd() {
