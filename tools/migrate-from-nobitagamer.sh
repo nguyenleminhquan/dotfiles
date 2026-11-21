@@ -233,7 +233,7 @@ find_all_links() {
   h="$(_glob_escape "$HOME")"
   find "$HOME" -xdev \( -path "$h/.dotfiles" -o -path "$h/.dotfiles-backup" -o -path "$h/.cache" \
     -o -path "$h/.ssh" -o -path "$h/.aws" -o -path "$h/data" -o -path "$h/.local/share/mise" \
-    -o -name node_modules -o -name .git \) -prune -o -type l -printf '%p\0%l\0'
+    -o \( -type d \( -name node_modules -o -name .git \) \) \) -prune -o -type l -printf '%p\0%l\0'
 }
 
 # collect_links: every symlink under $HOME whose target is inside the old
@@ -437,13 +437,19 @@ _re_escape() {
 }
 
 # --- masking: what is printed must not carry a secret ------------------------------------------
-# mask_userinfo <text>: "user:password@" in a URL becomes "<hidden>@". Result in $MASKED.
+# mask_userinfo <text>: any userinfo of a URL ("user:password@", a bare token@,
+# a password that itself holds "@" or "/") becomes "<hidden>@". Everything between
+# "://" and the last "@" of the same word is taken as userinfo: that can hide a
+# little more than strictly needed (an "@" later in a path), never less. Result
+# in $MASKED.
 mask_userinfo() {
-  local s="$1"
-  while [[ $s =~ ://[^/@[:space:]]+:[^/@[:space:]]+@ ]]; do
-    s="${s/"${BASH_REMATCH[0]}"/://<hidden>@}"
+  local rest="$1" out='' m
+  while [[ $rest =~ ://[^[:space:]]*@ ]]; do
+    m="${BASH_REMATCH[0]}"
+    out+="${rest%%"$m"*}://<hidden>@"
+    rest="${rest#*"$m"}"
   done
-  MASKED="$s"
+  MASKED="$out$rest"
 }
 
 # looks_secret <text>: the history rules (the one definition), after removing the

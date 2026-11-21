@@ -65,6 +65,12 @@ check_helpers() {
   assert_eq "$(nd_rc "$sh" 'port 127.0.0.1 70000')" 2 "$sh: port above 65535 is rejected"
   assert_eq "$(nd_rc "$sh" 'port 127.0.0.1 0')" 2 "$sh: port 0 is rejected"
   assert_eq "$(nd_rc "$sh" 'port 127.0.0.1 80 soon')" 2 "$sh: bad timeout is rejected"
+  # GNU `timeout 0` means no timeout at all, so 0 must never reach it.
+  for zero in 0 0.0 00 .0 0.; do
+    assert_eq "$(nd_rc "$sh" "port 127.0.0.1 80 $zero")" 2 "$sh: timeout $zero is rejected"
+  done
+  assert_ok "$sh: a zero timeout prints the usage" -- grep -q '^usage: port' <<<"$(nd_run "$sh" 'port 127.0.0.1 80 0' 2>&1 || true)"
+  assert_eq "$(nd_rc "$sh" 'port 127.0.0.1 1 0.5')" 1 "$sh: a fractional timeout is still accepted"
 
   assert_fail "$sh: certinfo fails cleanly offline" -- nd_run "$sh" 'certinfo 203.0.113.1'
   assert_eq "$(nd_run "$sh" 'certinfo 203.0.113.1' 2>&1 >/dev/null || true)" "certinfo: cannot connect to 203.0.113.1:443" "$sh: certinfo message"

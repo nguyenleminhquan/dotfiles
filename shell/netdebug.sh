@@ -38,6 +38,15 @@ port() {
       return 2
       ;;
   esac
+  # GNU timeout treats 0 (also 0.0, 00) as "no timeout": a hung connect would never return.
+  case $t in
+    *[1-9]*) ;;
+    *)
+      echo "port: the timeout must be greater than 0: $t" >&2
+      echo "usage: port <host> <port> [timeout_s]" >&2
+      return 2
+      ;;
+  esac
   if ! command -v timeout >/dev/null 2>&1; then
     echo "port: timeout (coreutils) not found" >&2
     return 2
