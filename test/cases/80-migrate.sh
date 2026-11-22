@@ -1181,6 +1181,41 @@ dry="$(run_brew "$bw" --dry-run --drop-linuxbrew)" || { printf '%s\n' "$dry" >&2
 assert_ok "workstation: a drop loses the login shell and screen only (the mise tools cover micro)" -- \
   grep -qF 'these commands will disappear: brewsh (login shell), screen; install them' <<<"$dry"
 
+# Without brew on its PATH install.sh needs curl and tar (server and workstation download tools):
+# when one of them exists only in the brew prefix, a drop would let install.sh die after the
+# destructive steps. The run refuses in the plan (dry run too), before anything is written, and
+# says what to do. A tool that is missing everywhere is not this check's business.
+lim="$fx/limited"
+mkdir -p "$lim"
+for f in /usr/bin/* /bin/*; do
+  n="${f##*/}"
+  if [ "$n" = curl ] || [ -e "$lim/$n" ]; then continue; fi
+  ln -s "$f" "$lim/$n"
+done
+bc="$fx/bc"
+V_BIG=0 V_BREW=1 make_old_home "$bc"
+make_fake_brew "$bc" brewsh curl
+before="$(tree_hash "$bc")"
+for extra in --dry-run ""; do
+  rc=0
+  out="$(PATH="$lim:$bc/brew/.linuxbrew/bin" run_brew "$bc" --drop-linuxbrew ${extra:+"$extra"})" || rc=$?
+  assert_ok "a drop that would take curl from install.sh is refused (${extra:-real run})" -- test "$rc" -ne 0
+  assert_ok "the refusal names curl and says what to do (${extra:-real run})" -- \
+    grep -qF 'curl exists only in linuxbrew' <<<"$out"
+  assert_ok "and offers both ways out (${extra:-real run})" -- \
+    grep -qF 'install curl from the system packages, or run again without --drop-linuxbrew' <<<"$out"
+done
+assert_eq "$(tree_hash "$bc")" "$before" "the refused run changed nothing"
+assert_file_absent "$bc/.dotfiles-backup"
+assert_file_absent "$bc/.config/dotfiles"
+# Control: curl missing everywhere is not blamed on the drop.
+bc2="$fx/bc2"
+V_BIG=0 V_BREW=1 make_old_home "$bc2"
+make_fake_brew "$bc2" brewsh
+rc=0
+out="$(PATH="$lim:$bc2/brew/.linuxbrew/bin" run_brew "$bc2" --dry-run --drop-linuxbrew)" || rc=$?
+assert_eq "$rc" 0 "a tool that brew does not have either is not a reason to refuse the drop: $out"
+
 profile_cases
 
 # The real home was never touched.

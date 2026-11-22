@@ -247,6 +247,37 @@ assert_ok "an /etc/environment that holds it is named" -- grep -Eq '^WARN +PATH.
 assert_eq "$(df_rc env DF_LINUXBREW_PREFIX="$brew" "$df" doctor)" 0 "a brew WARN does not fail the doctor"
 rm -f ~/.config/dotfiles/env.local
 
+# brew only in /etc/environment: pam_env gives every ssh and console login that PATH before any
+# shell file runs, so a probe that starts from the default PATH never sees it. The probe starts
+# from the PATH= line of /etc/environment (parsed, never sourced), and a brew that file holds is
+# a WARN whether it comes before or after /usr/bin, since it is not from the marked block. Some
+# distributions reset PATH in /etc/profile, which hides it from a login probe: the file itself is
+# looked at too.
+rm -f ~/.config/dotfiles/env.local
+for order in before after; do
+  if [ "$order" = before ]; then
+    printf 'PATH="%s/bin:/usr/local/bin:/usr/bin:/bin"\n' "$brew" >"$fx/etc-environment"
+  else
+    printf 'PATH="/usr/local/bin:/usr/bin:/bin:%s/bin"\n' "$brew" >"$fx/etc-environment"
+  fi
+  out="$(DF_LINUXBREW_PREFIX="$brew" DF_ETC_ENVIRONMENT_FILE="$fx/etc-environment" probe_doctor)"
+  assert_ok "brew only in /etc/environment ($order /usr/bin) is a WARN naming the file" -- \
+    grep -Eq "^WARN +PATH: .*$brew.*/etc/environment" <<<"$out"
+  assert_fail "and not the OK line ($order /usr/bin)" -- grep -Eq '^OK +PATH: (no linuxbrew|linuxbrew)' <<<"$out"
+  assert_eq "$(grep -c '^FAIL' <<<"$out" || true)" 0 "the /etc/environment brew is no FAIL ($order /usr/bin)"
+  # The marked env.local block does not excuse a brew that /etc/environment also puts there.
+  brew_block "$brew" >~/.config/dotfiles/env.local
+  out="$(DF_LINUXBREW_PREFIX="$brew" DF_ETC_ENVIRONMENT_FILE="$fx/etc-environment" probe_doctor)"
+  assert_ok "the block does not hide an /etc/environment brew ($order /usr/bin)" -- grep -Eq '^WARN +PATH: .*/etc/environment' <<<"$out"
+  rm -f ~/.config/dotfiles/env.local
+done
+# A PATH line that needs a shell to evaluate is not used; the default start PATH stays.
+printf 'PATH="$PATH:%s/bin"\n' "$brew" >"$fx/etc-environment"
+out="$(DF_LINUXBREW_PREFIX="$brew" DF_ETC_ENVIRONMENT_FILE="$fx/etc-environment" probe_doctor)"
+assert_ok "a PATH line with a variable in it is ignored" -- grep -Eq '^OK +PATH: no linuxbrew|^WARN +PATH: .*/etc/environment' <<<"$out"
+assert_eq "$(grep -c '^FAIL' <<<"$out" || true)" 0 "and is no FAIL"
+rm -f "$fx/etc-environment"
+
 # A login shell that lives in brew while a fresh session has no brew: its owner cannot log in
 # by name tomorrow, and `zsh` is gone from PATH.
 out="$(DF_LINUXBREW_PREFIX="$brew" DF_LOGIN_SHELL="$brew/bin/zsh" probe_doctor)"

@@ -1005,6 +1005,41 @@ path_without() {
   printf '%s' "$out"
 }
 
+# tool_on_path <tool> <path>: <tool> is an executable in one of the directories of <path>.
+tool_on_path() {
+  local d
+  local -a dirs=()
+  IFS=: read -ra dirs <<<"$2"
+  for d in ${dirs[@]+"${dirs[@]}"}; do
+    if [ -n "$d" ] && [ -x "$d/$1" ] && [ ! -d "$d/$1" ]; then return 0; fi
+  done
+  return 1
+}
+
+# check_strip_prereqs: install.sh dies on a missing prerequisite (curl and tar for the tool
+# downloads of server and workstation, git or curl+tar to fetch the code when DOTFILES_REPO is set),
+# and it runs without brew on its PATH when nothing keeps brew. A prerequisite that only brew has
+# would make it die AFTER the links and files were moved, so refuse now, in the plan, before
+# anything is written. A tool that is missing everywhere is not this check's business.
+check_strip_prereqs() {
+  local clean tool
+  local -a need=() miss=()
+  clean="$(path_without "$BREW_PREFIX")"
+  case "$profile" in
+    server | workstation) need+=(curl tar) ;;
+  esac
+  if [ -n "${DOTFILES_REPO:-}" ] && ! tool_on_path git "$clean"; then need+=(curl tar); fi
+  for tool in ${need[@]+"${need[@]}"}; do
+    case " ${miss[*]-} " in *" $tool "*) continue ;; esac
+    if ! tool_on_path "$tool" "$clean"; then miss+=("$tool"); fi
+  done
+  for tool in ${miss[@]+"${miss[@]}"}; do
+    if [ -x "$BREW_PREFIX/bin/$tool" ] || [ -x "$BREW_PREFIX/sbin/$tool" ]; then
+      die "$tool exists only in linuxbrew ($BREW_PREFIX), and install.sh runs without brew on its PATH here (nothing keeps brew): install $tool from the system packages, or run again without --drop-linuxbrew"
+    fi
+  done
+}
+
 # plan_linuxbrew: the old shells load linuxbrew (brew shellenv, or a PATH assignment naming it) and
 # its bin exists. What would vanish without it: commands in brew's bin that are not on a clean system
 # PATH (the one a fresh ssh or cron session starts with) and that the profile does not provide: the
@@ -1067,6 +1102,7 @@ plan_linuxbrew() {
     if [ "${LOCAL_KIND[$((${#LOCAL_KIND[@]} - 1))]}" = present ]; then where="the block is already in env.local"; fi
     note="kept on PATH ($where) — only there: $(join_commas "${full[@]}")"
   fi
+  if [ "$BREW_STRIP" = 1 ]; then check_strip_prereqs; fi
   LOCAL_NOTES+=("linuxbrew|$note")
 }
 

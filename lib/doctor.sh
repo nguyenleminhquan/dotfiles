@@ -52,14 +52,36 @@ _df_doctor_tools() {
 # Packages the dotfiles lean on but do not install: their absence is a WARN.
 DF_DOCTOR_PACKAGES=(git screen curl ssh openssl ping)
 
+# _df_doctor_start_path: the PATH a login starts with before any shell file runs. pam_env sets
+# it from the PATH= line of /etc/environment for ssh and console logins, so the probe starts
+# there too (the line is parsed, never sourced; one that needs a shell to evaluate, or that
+# is not a plain value, is ignored); otherwise the usual default.
+_df_doctor_start_path() {
+  local file="${DF_ETC_ENVIRONMENT_FILE:-/etc/environment}" line v=""
+  if [ -r "$file" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      if [[ $line =~ ^[[:space:]]*(export[[:space:]]+)?PATH=(.*)$ ]]; then v="${BASH_REMATCH[2]}"; fi
+    done <"$file"
+  fi
+  v="${v#\"}"
+  v="${v%\"}"
+  v="${v#\'}"
+  v="${v%\'}"
+  case "$v" in
+    '' | *'$'* | *'`'* | *'"'* | *"'"* | *[[:space:]]* | *\* | *\;* | *\&* | *\|* | *\(* | *\)* | *\<* | *\>* | *\** | *\?*) v="" ;;
+  esac
+  printf '%s' "${v:-/usr/local/bin:/usr/bin:/bin}"
+}
+
 # _df_doctor_clean <bash args...>: bash in the environment a bare ssh or cron
-# session starts with (nothing inherited from the caller's shell), with stderr
-# folded into stdout so that any noise at all shows up.
+# session starts with (nothing inherited from the caller's shell, PATH from
+# _df_doctor_start_path), with stderr folded into stdout so that any noise at all
+# shows up.
 _df_doctor_clean() {
   local -a limit=()
   if command -v timeout >/dev/null 2>&1; then limit=(timeout 30); fi
   ${limit[@]+"${limit[@]}"} env -i HOME="$HOME" USER="${USER:-$(id -un)}" \
-    PATH=/usr/local/bin:/usr/bin:/bin bash "$@" 2>&1 </dev/null
+    PATH="$(_df_doctor_start_path)" bash "$@" 2>&1 </dev/null
 }
 
 # _df_doctor_session <label> <bash args...>: the session must print exactly "ok".
@@ -181,7 +203,7 @@ _df_doctor_check_mise_config() {
 # is not what this install put there. A login shell inside the brew prefix while
 # a fresh session has no brew means `zsh` and friends are gone from PATH.
 _df_doctor_check_path() {
-  local prefix out path part i=0 brew=-1 sys=-1 login where msg env_file
+  local prefix out path part i=0 brew=-1 sys=-1 login where msg env_file etc_has
   local -a parts=()
   prefix="$(df_linuxbrew_prefix)"
   out="$(_df_doctor_clean -lc 'printf "%s\n" "$PATH"')" || :
@@ -198,7 +220,17 @@ _df_doctor_check_path() {
     esac
     i=$((i + 1))
   done
+  # A brew that /etc/environment holds reaches every ssh and console login through pam_env, and
+  # the marked block of env.local does not account for it. Some distributions reset PATH in
+  # /etc/profile, which hides it from this login probe; the file is looked at too.
+  env_file="${DF_ETC_ENVIRONMENT_FILE:-/etc/environment}"
+  etc_has=0
+  if grep -qsF -e linuxbrew -e "$prefix" "$env_file"; then etc_has=1; fi
   if [ "$brew" -lt 0 ]; then
+    if [ "$etc_has" = 1 ]; then
+      _df_doc_warn "PATH: linuxbrew ($prefix) is on the PATH of ssh and console logins through /etc/environment (pam_env), which this install cannot undo (as root, remove it there)"
+      return 0
+    fi
     login="$(df_login_shell)"
     case "$login" in
       "$prefix"/*)
@@ -209,7 +241,7 @@ _df_doctor_check_path() {
     return 0
   fi
   if [ "$sys" -lt 0 ] || [ "$brew" -gt "$sys" ]; then where=after; else where=before; fi
-  if [ "$where" = after ] && grep -qxF -- "$DF_LINUXBREW_BEGIN" "$HOME/.config/dotfiles/env.local" 2>/dev/null; then
+  if [ "$where" = after ] && [ "$etc_has" = 0 ] && grep -qxF -- "$DF_LINUXBREW_BEGIN" "$HOME/.config/dotfiles/env.local" 2>/dev/null; then
     _df_doc_ok "PATH: linuxbrew on PATH (appended last) through env.local; remove the block when brew is gone"
     return 0
   fi
@@ -218,8 +250,7 @@ _df_doctor_check_path() {
   else
     msg="PATH: linuxbrew ($prefix) is on a fresh login session's PATH, but not through the marked block of the dotfiles migration in env.local; find where it is set (~/.profile, ~/.bash_profile, /etc/profile.d) or replace that with the block"
   fi
-  env_file="${DF_ETC_ENVIRONMENT_FILE:-/etc/environment}"
-  if grep -qsF -e linuxbrew -e "$prefix" "$env_file"; then
+  if [ "$etc_has" = 1 ]; then
     msg="$msg; /etc/environment sets it, which this install cannot undo (as root, remove it there)"
   fi
   _df_doc_warn "$msg"
