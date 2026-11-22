@@ -55,7 +55,8 @@ profile installed, and nothing else.
 
 ```sh
 dotfiles update      # fetch the newest code and re-run the installer with the saved profile
-dotfiles doctor      # check the install; exit 1 on a FAIL
+dotfiles doctor      # check the install as a NEW terminal sees it (a login shell with a clean
+                     # environment, not this shell's PATH); exit 1 on a FAIL
 dotfiles profile     # print the installed profile
 dotfiles uninstall   # remove the links, restore the backed up originals
 dotfiles uninstall --purge          # also remove the tools and the checkout
@@ -112,6 +113,26 @@ They are never committed, and install, update and uninstall never overwrite them
 | `~/.zshrc.local`, `~/.bashrc.local` | interactive shells only | aliases, completions, key bindings, agents (`eval "$(gpg-agent ...)"`) |
 | `~/.gitconfig.local` | git | identity, signing key, credential helper, `safe.directory` |
 
+`env.local` can also hold marked blocks written by the migration (the
+`GNUPGHOME` export, and the linuxbrew block below). Each is delimited by
+`# >>> ... >>>` and `# <<< ... <<<` lines; delete the whole block to remove it.
+
+Linuxbrew on PATH, when a host still needs it (the block the migration adds):
+
+```sh
+# >>> dotfiles: linuxbrew on PATH >>>
+# The login shell and tools such as screen live only in linuxbrew on this host.
+# Appended last, so system tools win; remove this block once brew is gone.
+case ":$PATH:" in
+  *:/home/linuxbrew/.linuxbrew/bin:*) ;;
+  *) [ -d /home/linuxbrew/.linuxbrew/bin ] && PATH="$PATH:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin" ;;
+esac
+# <<< dotfiles: linuxbrew on PATH <<<
+```
+
+`dotfiles doctor` recognises it (`OK PATH: linuxbrew on PATH (appended last) through
+env.local`); linuxbrew on PATH from anywhere else, or in front of `/usr/bin`, is a `WARN`.
+
 Two rules of thumb. Per-project environment (`KUBECONFIG`, `HELMFILE_ENVIRONMENT`,
 ...) belongs in the project's `mise.toml` under `[env]`, not in a home-wide rc
 file. Tokens do not belong in rc files at all: prefer the tool's own login
@@ -125,7 +146,8 @@ by its git origin or its `.dots` file and refuses anything else. `--profile
 minimal|server|workstation` picks what gets installed; it defaults to
 `workstation` under WSL and is mandatory on any other host (a server must not
 get the workstation tools), and a missing one is refused before anything is
-changed.
+changed. `--drop-linuxbrew` opts out of keeping linuxbrew on `PATH` (see the
+Linuxbrew item below).
 
 1. Dry run first. It writes nothing and prints the plan: what is backed up, the
    symlinks that point into the old checkout, how much of the zsh history would
@@ -165,6 +187,20 @@ What happens to the old local layer:
   `~/...`, `$XDG_CONFIG_HOME/...`) and that directory holds keys, a marked
   `export GNUPGHOME="$HOME/..."` goes into `~/.config/dotfiles/env.local`.
   Without it gpg would look in `~/.gnupg` and find no keys.
+- **Linuxbrew.** When the old shells load it (`brew shellenv` or a `PATH` assignment naming
+  it) and its `bin` exists, the migration lists the commands that exist only there: the
+  login shell when it lives under the brew prefix, the doctor's packages (`git screen curl
+  ssh openssl ping`), `zsh`, `micro` and `nano`, minus what a system `PATH`
+  (`/usr/local/bin:/usr/bin:/bin`) already has and what the chosen profile provides (the
+  tools in `config/mise/commands.*`; `zsh` through zsh-bin on `server` and `workstation`).
+  If the list is not empty, the marked block of [Local layer](#local-layer) goes into
+  `~/.config/dotfiles/env.local` (same rules as `GNUPGHOME`: created, or appended once, or
+  left alone when already there), so those commands stay reachable and system tools still
+  win. The report says `linuxbrew: kept on PATH (appended last) — only there: ...`.
+  With `--drop-linuxbrew` nothing is written and the report says `linuxbrew: dropped
+  (--drop-linuxbrew) — these commands will disappear: ...`; get them back with system
+  packages, or run again without the flag. Linuxbrew itself is never touched, and
+  `restore.sh` removes the block like any other.
 - **Report.** The old shell files are scanned (the old checkout only, no walk of
   your home) for files they source or test and for variables that relocate
   state (`GNUPGHOME`, `ZDOTDIR`, `HISTFILE`, `XDG_*_HOME`). Each file that exists
@@ -197,6 +233,10 @@ without zsh, 22.04, 24.04 without git, Rocky 9, and a WSL1 stand-in) and profile
 and prints a `row | profile | case | result` table. The exit code is 1 if any row
 fails. Set `GITHUB_TOKEN` in the environment to raise the GitHub API limit for
 the tool downloads; it is passed into the container and never printed.
+
+`DF_LINUXBREW_PREFIX`, `DF_LOGIN_SHELL` and `DF_ETC_ENVIRONMENT_FILE` are test hooks
+(the linuxbrew directory, the login shell, `/etc/environment`) for the migration
+and the doctor; their defaults are the real locations and nothing else sets them.
 
 ## Leak guard
 

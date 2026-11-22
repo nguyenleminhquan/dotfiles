@@ -1,5 +1,5 @@
 # shellcheck disable=SC2034  # DF_* variables are the public interface, consumed by callers
-# Platform detection. Meant to be sourced; defines functions only.
+# Platform detection. Meant to be sourced; defines functions and two constants.
 #
 # df_detect sets:
 #   DF_OS_ID       ubuntu | rocky | unknown
@@ -9,7 +9,7 @@
 #   DF_GLIBC       glibc version (e.g. 2.31), may be empty
 #
 # DF_OS_RELEASE_FILE and DF_PROC_VERSION_FILE override the files that are read
-# and exist for tests only.
+# and exist for tests only, like DF_LINUXBREW_PREFIX and DF_LOGIN_SHELL below.
 
 # _df_os_field <key> <file>: value of KEY=value, without surrounding quotes.
 # The file is parsed, never sourced, so it cannot clobber variables or run code.
@@ -61,3 +61,26 @@ df_platform_supported() {
   log_error "unsupported platform: ${DF_OS_ID} ${DF_OS_VERSION:-(no version)}; supported: Ubuntu 20.04/22.04/24.04, Rocky 9"
   return 1
 }
+
+# df_linuxbrew_prefix: where linuxbrew lives on this host (the place its installer uses
+# for every user). DF_LINUXBREW_PREFIX replaces it and exists for tests only.
+df_linuxbrew_prefix() {
+  printf '%s' "${DF_LINUXBREW_PREFIX:-/home/linuxbrew/.linuxbrew}"
+}
+
+# df_login_shell: the login shell of the current user as passwd has it (what a new terminal
+# or an ssh login starts), falling back to $SHELL. DF_LOGIN_SHELL replaces it and exists for
+# tests only.
+df_login_shell() {
+  local sh="${DF_LOGIN_SHELL:-}"
+  if [ -z "$sh" ]; then
+    sh="$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f7)" || sh=""
+  fi
+  [ -n "$sh" ] || sh="${SHELL:-}"
+  printf '%s' "$sh"
+}
+
+# The marked block that keeps brew-only commands reachable: the migration writes it into
+# ~/.config/dotfiles/env.local and the doctor recognises it by the first line.
+DF_LINUXBREW_BEGIN='# >>> dotfiles: linuxbrew on PATH >>>'
+DF_LINUXBREW_END='# <<< dotfiles: linuxbrew on PATH <<<'

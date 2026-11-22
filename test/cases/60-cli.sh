@@ -97,13 +97,12 @@ for what in 'bash -c' 'bash -lc' 'ssh-like bash' 'PATH order' 'profile'; do
   assert_ok "doctor reports: $what" -- grep -q "^OK .*$what" <<<"$doctor_out"
 done
 
-# The old setup put Homebrew on PATH, sometimes through /etc/environment, which
-# user scope cannot undo: a WARN naming it, never a FAIL.
-assert_ok "no linuxbrew on PATH is an OK line" -- grep -Eq '^OK +PATH: no /home/linuxbrew' <<<"$doctor_out"
-brew_path="$PATH:/home/linuxbrew/.linuxbrew/bin"
-out="$(PATH="$brew_path" df_out "$df" doctor)"
-assert_ok "linuxbrew on PATH is a WARN" -- grep -Eq '^WARN +PATH contains /home/linuxbrew.*/etc/environment' <<<"$out"
-assert_eq "$(PATH="$brew_path" df_rc "$df" doctor)" 0 "and does not fail the doctor"
+# The old setup put Homebrew on PATH. The doctor judges the PATH of a fresh login
+# session (case_doctor_fresh_session below), so linuxbrew in the PATH this shell
+# inherited means nothing: it is no WARN, and no package is found through it.
+assert_ok "no linuxbrew on PATH is an OK line" -- grep -Eq '^OK +PATH: no linuxbrew' <<<"$doctor_out"
+out="$(PATH="$PATH:/home/linuxbrew/.linuxbrew/bin" df_out "$df" doctor)"
+assert_ok "linuxbrew only in the inherited PATH is not seen" -- grep -Eq '^OK +PATH: no linuxbrew' <<<"$out"
 
 # A package that is on this row is OK, one that is not is a WARN and never a FAIL.
 for p in git screen curl ssh openssl ping; do
@@ -177,6 +176,85 @@ assert_eq "$(df_rc "$df" doctor)" 1 "a PATH with .local/bin before /usr/bin fail
 assert_ok "the FAIL line names the PATH" -- grep -Eq '^FAIL +PATH order' <<<"$out"
 rm -f ~/.config/dotfiles/env.local
 assert_eq "$(df_rc "$df" doctor)" 0 "doctor passes again once env.local is gone"
+
+# --- case_doctor_fresh_session ------------------------------------------------------------
+# The doctor looks at what a NEW terminal sees: the PATH of a login shell started with
+# nothing inherited (like ssh or cron). install.sh runs it from the old shell, whose PATH
+# has more in it than a fresh session will have. The linuxbrew prefix is a test hook
+# (DF_LINUXBREW_PREFIX), as are DF_LOGIN_SHELL and DF_ETC_ENVIRONMENT_FILE; the stubs
+# below stand in for tools that exist only there.
+brew="$fx/brew"
+inh="$fx/inherited"
+mkdir -p "$brew/bin" "$inh"
+brew_begin='# >>> dotfiles: linuxbrew on PATH >>>'
+# brew_block <prefix>: the block `dotfiles migrate` writes into env.local.
+brew_block() {
+  printf '%s\n' "$brew_begin" \
+    '# The login shell and tools such as screen live only in linuxbrew on this host.' \
+    '# Appended last, so system tools win; remove this block once brew is gone.' \
+    'case ":$PATH:" in' \
+    "  *:$1/bin:*) ;;" \
+    "  *) [ -d $1/bin ] && PATH=\"\$PATH:$1/bin:$1/sbin\" ;;" \
+    'esac' \
+    '# <<< dotfiles: linuxbrew on PATH <<<'
+}
+stub() { printf '#!/bin/sh\nexit 0\n' >"$1"; chmod +x "$1"; }
+# probe_doctor: the doctor with one package that no system has, and nothing else changed.
+probe_doctor() { ( . /src/lib/doctor.sh; DF_DOCTOR_PACKAGES=(dfprobe); df_doctor ) 2>&1 || true; }
+mkdir -p ~/.config/dotfiles
+
+# A package that only the inherited PATH has is missing for a new terminal. This is the
+# node that passed the install's doctor and warned in a fresh login.
+stub "$inh/dfprobe"
+out="$(PATH="$inh:$PATH" probe_doctor)"
+assert_ok "a package only the inherited PATH has is a WARN" -- grep -Eq '^WARN +package: dfprobe' <<<"$out"
+rm -f "$inh/dfprobe"
+
+# A package that the env.local block makes reachable is found by a fresh session.
+stub "$brew/bin/dfprobe"
+brew_block "$brew" >~/.config/dotfiles/env.local
+out="$(DF_LINUXBREW_PREFIX="$brew" probe_doctor)"
+assert_ok "a package reached through the env.local block is OK" -- grep -Eq '^OK +package: dfprobe' <<<"$out"
+assert_ok "and the block is named as the reason" -- \
+  grep -Eq '^OK +PATH: linuxbrew on PATH \(appended last\) through env.local; remove the block when brew is gone' <<<"$out"
+assert_eq "$(grep -c '^FAIL' <<<"$out" || true)" 0 "the block is no FAIL"
+# A zsh that only the block provides is the zsh of a new terminal (rows without a system zsh).
+stub "$brew/bin/zsh"
+out="$(DF_LINUXBREW_PREFIX="$brew" probe_doctor)"
+assert_ok "a zsh reached through the block is found" -- grep -Eq '^OK +zsh startup: ' <<<"$out"
+rm -f "$brew/bin/zsh"
+# Without the block the same package is missing, whatever the inherited PATH says.
+rm -f ~/.config/dotfiles/env.local
+out="$(PATH="$brew/bin:$PATH" DF_LINUXBREW_PREFIX="$brew" probe_doctor)"
+assert_ok "without the block the package is a WARN" -- grep -Eq '^WARN +package: dfprobe' <<<"$out"
+assert_ok "and the inherited brew directory is not a PATH finding" -- grep -Eq '^OK +PATH: no linuxbrew' <<<"$out"
+rm -f "$brew/bin/dfprobe"
+
+# brew on PATH from anywhere else, or in front of /usr/bin, stays a WARN. /etc/environment
+# is named only when it really holds linuxbrew.
+printf 'PATH="$PATH:%s/bin"\n' "$brew" >~/.config/dotfiles/env.local
+out="$(DF_LINUXBREW_PREFIX="$brew" probe_doctor)"
+assert_ok "brew on PATH without the marked block is a WARN" -- grep -Eq "^WARN +PATH: .*$brew" <<<"$out"
+assert_fail "the WARN does not blame /etc/environment, which is clean" -- grep -Eq '^WARN +PATH.*/etc/environment' <<<"$out"
+{ printf '%s\n' "$brew_begin" "PATH=\"$brew/bin:\$PATH\"" '# <<< dotfiles: linuxbrew on PATH <<<'; } >~/.config/dotfiles/env.local
+out="$(DF_LINUXBREW_PREFIX="$brew" probe_doctor)"
+assert_ok "brew in front of /usr/bin is a WARN even with the marker" -- grep -Eq "^WARN +PATH: .*$brew.*before /usr/bin" <<<"$out"
+assert_fail "and not the OK line" -- grep -Eq '^OK +PATH: linuxbrew' <<<"$out"
+printf 'PATH="$PATH:%s/bin"\n' "$brew" >~/.config/dotfiles/env.local
+printf 'PATH=/usr/bin:%s/bin\n' "$brew" >"$fx/etc-environment"
+out="$(DF_LINUXBREW_PREFIX="$brew" DF_ETC_ENVIRONMENT_FILE="$fx/etc-environment" probe_doctor)"
+assert_ok "an /etc/environment that holds it is named" -- grep -Eq '^WARN +PATH.*/etc/environment' <<<"$out"
+assert_eq "$(df_rc env DF_LINUXBREW_PREFIX="$brew" "$df" doctor)" 0 "a brew WARN does not fail the doctor"
+rm -f ~/.config/dotfiles/env.local
+
+# A login shell that lives in brew while a fresh session has no brew: its owner cannot log in
+# by name tomorrow, and `zsh` is gone from PATH.
+out="$(DF_LINUXBREW_PREFIX="$brew" DF_LOGIN_SHELL="$brew/bin/zsh" probe_doctor)"
+assert_ok "a login shell in brew without brew on PATH is a WARN naming it" -- \
+  grep -Eq "^WARN +PATH: login shell $brew/bin/zsh .*linuxbrew" <<<"$out"
+out="$(DF_LINUXBREW_PREFIX="$brew" DF_LOGIN_SHELL=/bin/bash probe_doctor)"
+assert_ok "an ordinary login shell is nothing to report" -- grep -Eq '^OK +PATH: no linuxbrew' <<<"$out"
+rm -rf "$brew" "$inh" "$fx/etc-environment"
 
 # Nothing installed: the doctor says so.
 assert_eq "$(HOME="$fx/empty-home" df_rc /src/bin/dotfiles doctor)" 1 "doctor without an install fails"

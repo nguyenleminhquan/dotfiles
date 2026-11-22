@@ -2,7 +2,7 @@
 # One-off migration from the old dotfiles (a clone of nobitagamer/dotfiles in
 # ~/.dotfiles) to this repo. Spec section 6.8.
 #
-#   tools/migrate-from-nobitagamer.sh [--profile minimal|server|workstation] [--dry-run]
+#   tools/migrate-from-nobitagamer.sh [--profile minimal|server|workstation] [--drop-linuxbrew] [--dry-run]
 #
 # The profile defaults to workstation under WSL (the rule install.sh uses); on
 # any other host --profile is mandatory and a missing one is refused before
@@ -25,13 +25,19 @@
 #      shells only, like the old setup; ~/.localrc itself is never touched), and
 #      the old GNUPGHOME is exported from ~/.config/dotfiles/env.local when its
 #      directory holds keys. Both are appended once and undone by restore.sh
+#      Linuxbrew: when the old shells load it and commands exist only there (the
+#      login shell, the doctor's packages, zsh, micro, nano; not what the profile
+#      installs), a marked block in the same env.local appends it to PATH, last, so
+#      that they stay reachable. --drop-linuxbrew writes no block and the report
+#      lists what disappears instead. Linuxbrew itself is never touched.
 #   7. prints what the old shells read that the new ones do not (sourced files,
 #      relocated variables such as GNUPGHOME or ZDOTDIR); informational only
 #   8. prints the old mise config against the new one (workstation: config.workstation.toml,
 #      server: config.toml, minimal: nothing, it installs no tools; informational)
-#   9. runs install.sh --profile <profile>
+#   9. runs install.sh --profile <profile> (without linuxbrew on its PATH when nothing
+#      keeps it, so that it judges the host the way a new terminal will see it)
 #
-# Linuxbrew, ~/.ssh and everything else outside that list are left alone, and
+# ~/.ssh and everything else outside that list are left alone, and
 # links that point outside the old dotfiles are never touched. --dry-run prints
 # every action and writes nothing at all.
 #
@@ -47,19 +53,26 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-usage: migrate-from-nobitagamer.sh [--profile minimal|server|workstation] [--dry-run]
+usage: migrate-from-nobitagamer.sh [--profile minimal|server|workstation] [--drop-linuxbrew] [--dry-run]
 
-  --profile P  profile to install; default workstation under WSL, mandatory elsewhere
-  --dry-run    print what would happen and write nothing
+  --profile P       profile to install; default workstation under WSL, mandatory elsewhere
+  --drop-linuxbrew  do not keep linuxbrew on PATH (default: kept, appended last, when a command
+                    exists only there); those commands then disappear, the report lists them
+  --dry-run         print what would happen and write nothing
 EOF
 }
 
 dry_run=0
 profile=""
+drop_brew=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run)
       dry_run=1
+      shift
+      ;;
+    --drop-linuxbrew)
+      drop_brew=1
       shift
       ;;
     --profile)
@@ -109,6 +122,10 @@ fi
 . "$self_root/lib/log.sh"
 # shellcheck source=lib/detect.sh
 . "$self_root/lib/detect.sh"
+# The doctor's package list and the commands each profile's tools provide: the one definition
+# of both (functions and variables only; nothing runs when it is sourced).
+# shellcheck source=lib/doctor.sh
+. "$self_root/lib/doctor.sh"
 # shellcheck source=lib/backup.sh
 . "$self_root/lib/backup.sh"
 # The one definition of what counts as a secret command line. Sourcing it only
@@ -769,12 +786,22 @@ LOCAL_END='# <<< migrated from nobitagamer/dotfiles <<<'
 LOCALRC_LINE='[ -r "$HOME/.localrc" ] && . "$HOME/.localrc"'
 
 LOCALRC=0
-# What gets written: one entry per file, relative to $HOME.
+# What gets written: one entry per block, relative to $HOME.
 LOCAL_REL=()
 LOCAL_BEGIN=()
 LOCAL_BODY=()
 LOCAL_WHAT=()
-LOCAL_KIND=() # new | append | present
+LOCAL_END_OF=() # the closing marker of each block
+# new | append | present | joined. A block for a file that another block of this run creates or
+# appends to is "joined" to it (LOCAL_JOIN holds the index): both are written, and undone, as one
+# piece of text, so that env.local can get GNUPGHOME and linuxbrew in one run.
+LOCAL_KIND=()
+LOCAL_JOIN=()
+# Linuxbrew (plan_linuxbrew): whether the old shells load it, its prefix, and whether install.sh
+# runs without it on PATH.
+BREW_USED=0
+BREW_PREFIX=""
+BREW_STRIP=0
 # What the user is told about what the old shells read: "<thing>|<fate>".
 LOCAL_NOTES=()
 declare -A VAR_SEEN=() VAR_VAL=() READ_SEEN=()
@@ -798,9 +825,11 @@ collect_old_reads() {
   local ctx_re='(^|[;&|({[:space:]])(source|\.)[[:space:]]+[^[:space:]]|(^|[;&|({[:space:]])(\[\[?|test)[[:space:]]+(![[:space:]]+)?-[a-zA-Z][[:space:]]'
   local assign_bash="${assign_re}(.*)\$"
   local tok_re='(\$HOME|\$\{HOME\}|~|\$ZDOTDIR|\$\{ZDOTDIR\}|\$XDG_(CONFIG|DATA|CACHE|STATE)_HOME|\$\{XDG_(CONFIG|DATA|CACHE|STATE)_HOME(:-[^}]*)?\})(/[A-Za-z0-9._/@+-]+)'
+  # A shell file that puts linuxbrew on PATH: `brew shellenv`, or a PATH assignment naming it.
+  local brew_re='brew[[:space:]]+shellenv|(^|[;&|({[:space:]])(export[[:space:]]+)?PATH=[^#]*linuxbrew'
   [ -d "$scan" ] || scan="$OLD"
   text="$(find "$scan" -name .git -prune -o -type f -size -512k -print0 2>/dev/null |
-    LC_ALL=C sort -z | xargs -0 -r grep -IhE -e "$assign_re" -e "$ctx_re" 2>/dev/null || true)"
+    LC_ALL=C sort -z | xargs -0 -r grep -IhE -e "$assign_re" -e "$ctx_re" -e "$brew_re" 2>/dev/null || true)"
   [ -n "$text" ] || return 0
 
   # Pass 1: the variables ($ZDOTDIR is needed to resolve the paths of pass 2).
@@ -817,18 +846,20 @@ collect_old_reads() {
   # Pass 2: the files.
   while IFS= read -r line; do
     [[ $line =~ ^[[:space:]]*# ]] && continue # a commented-out line reads nothing
+    if [[ $line =~ $brew_re ]]; then BREW_USED=1; fi
     [[ $line =~ $ctx_re ]] || continue
     rest="$line"
     while [[ $rest =~ $tok_re ]]; do
       tok="${BASH_REMATCH[0]}"
       rest="${rest#*"$tok"}"
-      [ -z "${READ_SEEN["$tok"]+x}" ] || continue
-      READ_SEEN["$tok"]=1
       resolve_value "$tok" "${VAR_VAL[ZDOTDIR]:-}"
       p="$RESOLVED"
       [ -n "$p" ] || continue
       norm_path "$p"
       p="$NORM"
+      # Once per file, however it is spelled (~/.profile and $HOME/.profile are one file).
+      [ -z "${READ_SEEN["$p"]+x}" ] || continue
+      READ_SEEN["$p"]=1
       [ -f "$p" ] || continue # a file that exists (a directory or a glob is not one)
       in_old "$p" && continue
       [ -z "${LINKSET["$p"]+x}" ] || continue
@@ -840,6 +871,10 @@ collect_old_reads() {
         "$HOME/.localrc") continue ;; # reported by plan_localrc
         "$HOME/.zshrc.local" | "$HOME/.bashrc.local" | "$HOME/.config/dotfiles/env.local")
           LOCAL_NOTES+=("$(disp "$p")|kept (the new dotfiles read it too)")
+          ;;
+        "$HOME/.profile")
+          # install.sh links its own ~/.profile, after saving this one in the backup.
+          LOCAL_NOTES+=("$(disp "$p")|replaced (backup kept)")
           ;;
         *) LOCAL_NOTES+=("$(disp "$p")|no longer read") ;;
       esac
@@ -859,9 +894,10 @@ collect_old_reads() {
   done
 }
 
-# add_local_target <relative path> <begin marker> <body> <what>: plan one marked block.
+# add_local_target <relative path> <begin marker> <body> <what> [end marker]: plan one marked block.
+# A block for a file that an earlier block of this run creates or appends to is joined to it.
 add_local_target() {
-  local rel="$1" f="$HOME/$1" kind
+  local rel="$1" f="$HOME/$1" kind join="" j
   if [ -e "$f" ] || [ -L "$f" ]; then
     # Like ~/.gitconfig.local and ~/.zsh_history in preflight: a link could lead outside $HOME or
     # into the old dotfiles (removed before the block is written), so a real file is required.
@@ -872,11 +908,22 @@ add_local_target() {
   else
     kind=new
   fi
+  if [ "$kind" != present ]; then
+    for j in "${!LOCAL_REL[@]}"; do
+      if [ "${LOCAL_REL[$j]}" = "$rel" ] && { [ "${LOCAL_KIND[$j]}" = new ] || [ "${LOCAL_KIND[$j]}" = append ]; }; then
+        kind=joined
+        join="$j"
+        break
+      fi
+    done
+  fi
   LOCAL_REL+=("$rel")
   LOCAL_BEGIN+=("$2")
   LOCAL_BODY+=("$3")
   LOCAL_WHAT+=("$4")
+  LOCAL_END_OF+=("${5:-$LOCAL_END}")
   LOCAL_KIND+=("$kind")
+  LOCAL_JOIN+=("$join")
 }
 
 plan_localrc() {
@@ -923,10 +970,111 @@ plan_gnupg() {
   add_local_target .config/dotfiles/env.local "$LOCAL_BEGIN_GPG" "export GNUPGHOME=\"\$HOME/${d#"$HOME"/}\"" "GNUPGHOME=\"\$HOME/${d#"$HOME"/}\""
 }
 
+# join_commas <items...>: "a, b, c".
+join_commas() {
+  local out="" x
+  for x in "$@"; do out+="${out:+, }$x"; done
+  printf '%s' "$out"
+}
+
+# linuxbrew_body <prefix>: the text between the markers: brew's directories appended to PATH, once,
+# and only while the directory exists. With the default prefix it is the block that was verified on
+# a real host (the test compares it byte for byte); a test prefix only changes the path.
+linuxbrew_body() {
+  local p="$1"
+  printf '%s\n' \
+    '# The login shell and tools such as screen live only in linuxbrew on this host.' \
+    '# Appended last, so system tools win; remove this block once brew is gone.' \
+    'case ":$PATH:" in' \
+    "  *:$p/bin:*) ;;" \
+    "  *) [ -d $p/bin ] && PATH=\"\$PATH:$p/bin:$p/sbin\" ;;" \
+    'esac'
+}
+
+# path_without <prefix>: $PATH without the entries inside <prefix>.
+path_without() {
+  local out="" part
+  local -a parts=()
+  IFS=: read -ra parts <<<"$PATH"
+  for part in ${parts[@]+"${parts[@]}"}; do
+    case "$part" in
+      "$1" | "$1"/*) continue ;;
+    esac
+    out+="${out:+:}$part"
+  done
+  printf '%s' "$out"
+}
+
+# plan_linuxbrew: the old shells load linuxbrew (brew shellenv, or a PATH assignment naming it) and
+# its bin exists. What would vanish without it: commands in brew's bin that are not on a clean system
+# PATH (the one a fresh ssh or cron session starts with) and that the profile does not provide: the
+# login shell when it lives under the prefix, the doctor's packages, zsh, micro and nano. The profile
+# provides the commands of its mise tools (config/mise/commands.*) and, for server and workstation,
+# zsh through zsh-bin. install.sh only installs zsh-bin when it finds no zsh, so it runs without
+# brew on its PATH whenever nothing keeps brew (BREW_STRIP); when brew is kept, zsh stays brew's and
+# is listed.
+# Default: add the marked block to env.local (same rules as the GNUPGHOME block). --drop-linuxbrew: no
+# block, the report names what disappears.
+plan_linuxbrew() {
+  local prefix login base="" cmd label d p found note where
+  local -a cand=() provided=() full=() rest=()
+  local -A seen=()
+  [ "$BREW_USED" = 1 ] || return 0
+  prefix="$(df_linuxbrew_prefix)"
+  [ -d "$prefix/bin" ] || return 0
+  BREW_PREFIX="$prefix"
+  login="$(df_login_shell)"
+  case "$login" in
+    "$prefix"/*) base="${login##*/}" ;;
+  esac
+  cand=(${base:+"$base"} "${DF_DOCTOR_PACKAGES[@]}" zsh micro nano)
+  mapfile -t provided < <(_df_doctor_tools "$profile" || true)
+  for cmd in "${cand[@]}"; do
+    [ -z "${seen["$cmd"]+x}" ] || continue
+    seen["$cmd"]=1
+    [ -x "$prefix/bin/$cmd" ] || [ -x "$prefix/sbin/$cmd" ] || continue
+    found=0
+    for d in /usr/local/bin /usr/bin /bin; do
+      if [ -x "$d/$cmd" ]; then found=1; fi
+    done
+    for p in ${provided[@]+"${provided[@]}"}; do
+      if [ "$p" = "$cmd" ]; then found=1; fi
+    done
+    [ "$found" = 0 ] || continue
+    label="$cmd"
+    if [ "$cmd" = "$base" ]; then label="$cmd (login shell)"; fi
+    full+=("$label")
+    if [ "$cmd" = zsh ] && [ "$profile" != minimal ]; then continue; fi
+    rest+=("$label")
+  done
+
+  if [ "$drop_brew" = 1 ]; then
+    BREW_STRIP=1
+    if [ "${#rest[@]}" = 0 ]; then
+      note="dropped (--drop-linuxbrew) — nothing depends on it"
+    else
+      note="dropped (--drop-linuxbrew) — these commands will disappear: $(join_commas "${rest[@]}"); install them with the system package manager, or run again without --drop-linuxbrew"
+    fi
+    if grep -qxF -- "$DF_LINUXBREW_BEGIN" "$HOME/.config/dotfiles/env.local" 2>/dev/null; then
+      note+="; the block already in ~/.config/dotfiles/env.local is left as it is"
+    fi
+  elif [ "${#rest[@]}" = 0 ]; then
+    BREW_STRIP=1
+    note="nothing depends on it (what it has is on the system or comes with the profile), so it is not kept on PATH"
+  else
+    add_local_target .config/dotfiles/env.local "$DF_LINUXBREW_BEGIN" "$(linuxbrew_body "$prefix")" "linuxbrew on PATH" "$DF_LINUXBREW_END"
+    where="appended last"
+    if [ "${LOCAL_KIND[$((${#LOCAL_KIND[@]} - 1))]}" = present ]; then where="the block is already in env.local"; fi
+    note="kept on PATH ($where) — only there: $(join_commas "${full[@]}")"
+  fi
+  LOCAL_NOTES+=("linuxbrew|$note")
+}
+
 plan_local() {
   collect_old_reads
   plan_localrc
   plan_gnupg
+  plan_linuxbrew
   if [ -n "${VAR_SEEN[ZDOTDIR]+x}" ]; then
     if [ -n "$HIST_SRC" ]; then
       LOCAL_NOTES+=("ZDOTDIR|history migrated to ~/.zsh_history")
@@ -958,20 +1106,24 @@ report_local() {
   done
 }
 
-# local_block <index>: the exact text appended to target <index>: the marked block, with a
-# newline in front when the file exists and does not end in one, so that removing the
-# block gives the original bytes back.
+# local_block <index>: the exact text appended to target <index>: the marked block (and the
+# blocks joined to it, in order), with a newline in front when the file exists and does not
+# end in one, so that removing the text gives the original bytes back.
 local_block() {
-  local i="$1" f="$HOME/${LOCAL_REL[$1]}"
+  local i="$1" f="$HOME/${LOCAL_REL[$1]}" k
   if [ "${LOCAL_KIND[$i]}" = append ] && [ -s "$f" ] && [ -n "$(tail -c 1 "$f")" ]; then printf '\n'; fi
-  printf '%s\n%s\n%s\n' "${LOCAL_BEGIN[$i]}" "${LOCAL_BODY[$i]}" "$LOCAL_END"
+  for k in "${!LOCAL_REL[@]}"; do
+    if [ "$k" = "$i" ] || [ "${LOCAL_JOIN[$k]}" = "$i" ]; then
+      printf '%s\n%s\n%s\n' "${LOCAL_BEGIN[$k]}" "${LOCAL_BODY[$k]}" "${LOCAL_END_OF[$k]}"
+    fi
+  done
 }
 
 # --- the plan, shared by --dry-run and the real run ----------------------------------------------
 BK_ITEMS=(.zshenv .bashrc .profile .bash_profile .config/mise/config.toml .config/zsh)
 
 report_plan() {
-  local i verb="would" item
+  local i verb="would" item kind strip_note
   [ "$dry_run" = 1 ] || verb="will"
   log_info "old setup: $OLD (git origin or .dots matches)"
   if [ "$dry_run" = 1 ]; then
@@ -997,16 +1149,20 @@ report_plan() {
     if [ -n "$EXC_SRC" ]; then log_info "git: $verb write ~/.config/git/ignore from $EXC_SRC"; fi
   fi
   for i in "${!LOCAL_REL[@]}"; do
-    case "${LOCAL_KIND[$i]}" in
+    kind="${LOCAL_KIND[$i]}"
+    if [ "$kind" = joined ]; then kind="${LOCAL_KIND[${LOCAL_JOIN[$i]}]}"; fi
+    case "$kind" in
       new) log_info "local: $verb add ${LOCAL_WHAT[$i]} to $(disp "$HOME/${LOCAL_REL[$i]}") (new file)" ;;
       append) log_info "local: $verb add ${LOCAL_WHAT[$i]} to $(disp "$HOME/${LOCAL_REL[$i]}") (existing file, backed up)" ;;
       present) log_info "local: $(disp "$HOME/${LOCAL_REL[$i]}") already has ${LOCAL_WHAT[$i]}, left as it is" ;;
     esac
   done
+  strip_note=""
+  if [ "$BREW_STRIP" = 1 ]; then strip_note=" (linuxbrew taken off its PATH: nothing keeps it)"; fi
   if [ -n "${DOTFILES_REPO:-}" ]; then
-    log_info "install: $verb run: DOTFILES_REPO=$DOTFILES_REPO bash $self_root/install.sh --profile $profile"
+    log_info "install: $verb run: DOTFILES_REPO=$DOTFILES_REPO bash $self_root/install.sh --profile $profile$strip_note"
   else
-    log_info "install: $verb run: DOTFILES_SRC=$self_root bash $self_root/install.sh --profile $profile"
+    log_info "install: $verb run: DOTFILES_SRC=$self_root bash $self_root/install.sh --profile $profile$strip_note"
   fi
 }
 
@@ -1134,7 +1290,7 @@ undo_block() {
     return 0
   fi
   if [ -f "$blockfile" ]; then
-    begin="$(grep -m 1 '^# >>> migrated from nobitagamer/dotfiles' "$blockfile" || true)"
+    begin="$(grep -m 1 '^# >>> ' "$blockfile" || true)"
   fi
   if [ -z "$begin" ]; then
     warn "$path: the staged copy of the migration block ($blockfile) is gone, remove the marked lines by hand"
@@ -1275,6 +1431,7 @@ stage() {
   fi
   for i in "${!LOCAL_REL[@]}"; do
     [ "${LOCAL_KIND[$i]}" != present ] || continue
+    [ "${LOCAL_KIND[$i]}" != joined ] || continue # written with the block it is joined to
     local_block "$i" >"$BK/staged/local-$i.block"
   done
 
@@ -1341,7 +1498,13 @@ apply() {
   else
     export DOTFILES_SRC="$self_root"
   fi
-  bash "$self_root/install.sh" --profile "$profile" || die "install.sh failed"
+  # Nothing keeps linuxbrew: install.sh must see the host as a new terminal will (zsh-bin is
+  # installed only when it finds no zsh). $BASH is absolute, so env needs no PATH to find it.
+  if [ "$BREW_STRIP" = 1 ]; then
+    env "PATH=$(path_without "$BREW_PREFIX")" "$BASH" "$self_root/install.sh" --profile "$profile" || die "install.sh failed"
+  else
+    bash "$self_root/install.sh" --profile "$profile" || die "install.sh failed"
+  fi
 
   if [ -n "$git_before" ]; then
     git_after="$(cd "$HOME" && git config --get user.email 2>/dev/null || true)"

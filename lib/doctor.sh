@@ -8,11 +8,20 @@
 # convenience. df_doctor returns 1 when any line is a FAIL, else 0.
 # DF_DOCTOR_SKIP_TOOLS=1 (set by install.sh --no-tools) means the tools were
 # skipped on purpose: the tool check is then a WARN instead of a FAIL per tool.
+#
+# Commands and PATH are judged as a NEW terminal sees them (a login shell started
+# with nothing inherited, see _df_doctor_clean), not as the shell that runs the
+# doctor does: install.sh runs it from the old shell, whose PATH has more in it.
+# DF_ETC_ENVIRONMENT_FILE (like DF_LINUXBREW_PREFIX and DF_LOGIN_SHELL, see
+# lib/detect.sh) replaces /etc/environment and exists for tests only.
 
 _df_doctor_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # One definition of df_ping_group_ok: the one the shell helpers use.
 # shellcheck source=shell/netdebug.sh
 . "$_df_doctor_root/shell/netdebug.sh"
+# df_linuxbrew_prefix and df_login_shell.
+# shellcheck source=lib/detect.sh
+. "$_df_doctor_root/lib/detect.sh"
 
 DF_DOCTOR_FAILS=0
 _df_doc_line() { printf '%-4s %s\n' "$1" "$2"; }
@@ -88,13 +97,16 @@ _df_doctor_path_order() {
 }
 
 # Run in a login shell, the way a real session finds its tools: one line
-# "missing <tool>" per absent command, and "trip <real path>" when trippy is
-# there (for the capability hint; mise shims cannot take a capability).
+# "missing <tool>" per absent command (_DF_DOCTOR_FIND), and "trip <real path>"
+# when trippy is there (for the capability hint; mise shims cannot take a
+# capability).
 # shellcheck disable=SC2016  # expanded by the inner bash
-_DF_DOCTOR_SCAN='
+_DF_DOCTOR_FIND='
 for t in "$@"; do
   command -v "$t" >/dev/null 2>&1 || echo "missing $t"
-done
+done'
+# shellcheck disable=SC2016
+_DF_DOCTOR_SCAN="$_DF_DOCTOR_FIND"'
 if command -v trip >/dev/null 2>&1; then
   p="$(cd / && mise which trip 2>/dev/null)" || p=""
   [ -n "$p" ] || p="$(command -v trip)"
@@ -162,25 +174,73 @@ _df_doctor_check_mise_config() {
   fi
 }
 
-# _df_doctor_check_path: the old setup put Homebrew on PATH (sometimes through
-# /etc/environment, which user scope cannot undo).
+# _df_doctor_check_path: linuxbrew in the PATH of a fresh login session. The old
+# setup loaded it from its shell files; the migration keeps brew-only commands
+# reachable through a marked block in env.local that appends it last. That block
+# is fine (system tools still win); brew anywhere else, or in front of /usr/bin,
+# is not what this install put there. A login shell inside the brew prefix while
+# a fresh session has no brew means `zsh` and friends are gone from PATH.
 _df_doctor_check_path() {
-  case ":$PATH:" in
-    *:/home/linuxbrew*)
-      _df_doc_warn "PATH contains /home/linuxbrew: the old setup may have added it in /etc/environment, which this install cannot undo (as root, remove it there)"
-      ;;
-    *) _df_doc_ok "PATH: no /home/linuxbrew" ;;
-  esac
+  local prefix out path part i=0 brew=-1 sys=-1 login where msg env_file
+  local -a parts=()
+  prefix="$(df_linuxbrew_prefix)"
+  out="$(_df_doctor_clean -lc 'printf "%s\n" "$PATH"')" || :
+  path="$(tail -n 1 <<<"$out")"
+  IFS=: read -ra parts <<<"$path"
+  for part in "${parts[@]}"; do
+    case "$part" in
+      "$prefix" | "$prefix"/*)
+        if [ "$brew" -lt 0 ]; then brew=$i; fi
+        ;;
+      /usr/bin)
+        if [ "$sys" -lt 0 ]; then sys=$i; fi
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  if [ "$brew" -lt 0 ]; then
+    login="$(df_login_shell)"
+    case "$login" in
+      "$prefix"/*)
+        _df_doc_warn "PATH: login shell $login lives in linuxbrew, which a fresh login session does not have on PATH, so zsh and the other brew commands are not found by name; keep brew on PATH (the dotfiles migration does it through env.local) or change the login shell to a system one"
+        ;;
+      *) _df_doc_ok "PATH: no linuxbrew in a fresh login session" ;;
+    esac
+    return 0
+  fi
+  if [ "$sys" -lt 0 ] || [ "$brew" -gt "$sys" ]; then where=after; else where=before; fi
+  if [ "$where" = after ] && grep -qxF -- "$DF_LINUXBREW_BEGIN" "$HOME/.config/dotfiles/env.local" 2>/dev/null; then
+    _df_doc_ok "PATH: linuxbrew on PATH (appended last) through env.local; remove the block when brew is gone"
+    return 0
+  fi
+  if [ "$where" = before ]; then
+    msg="PATH: linuxbrew ($prefix) comes before /usr/bin in a fresh login session, so its tools shadow the system's; look in ~/.config/dotfiles/env.local, ~/.profile and ~/.bash_profile"
+  else
+    msg="PATH: linuxbrew ($prefix) is on a fresh login session's PATH, but not through the marked block of the dotfiles migration in env.local; find where it is set (~/.profile, ~/.bash_profile, /etc/profile.d) or replace that with the block"
+  fi
+  env_file="${DF_ETC_ENVIRONMENT_FILE:-/etc/environment}"
+  if grep -qsF -e linuxbrew -e "$prefix" "$env_file"; then
+    msg="$msg; /etc/environment sets it, which this install cannot undo (as root, remove it there)"
+  fi
+  _df_doc_warn "$msg"
 }
 
+# _df_doctor_check_packages: one fresh login session answers for all of them. A package that
+# only this shell's PATH has is not there for a new terminal, and the line says where it is.
 _df_doctor_check_packages() {
-  local p
+  local p out here
+  out="$(_df_doctor_clean -lc "$_DF_DOCTOR_FIND" _ "${DF_DOCTOR_PACKAGES[@]}")" || :
   for p in "${DF_DOCTOR_PACKAGES[@]}"; do
-    if command -v "$p" >/dev/null 2>&1; then
-      _df_doc_ok "package: $p"
-    else
-      _df_doc_warn "package: $p is not installed (install it with the system package manager)"
-    fi
+    case $'\n'"$out"$'\n' in
+      *$'\nmissing '"$p"$'\n'*)
+        if here="$(command -v "$p" 2>/dev/null)"; then
+          _df_doc_warn "package: $p is not in the PATH of a fresh login session (only in this shell: $here); install it with the system package manager"
+        else
+          _df_doc_warn "package: $p is not installed (install it with the system package manager)"
+        fi
+        ;;
+      *) _df_doc_ok "package: $p" ;;
+    esac
   done
 }
 
@@ -196,10 +256,17 @@ _df_doctor_check_ping() {
 
 # _df_doctor_check_zsh <profile>: median of three `zsh -i -c exit` runs, as
 # information. The profiles with tools expect a zsh; minimal makes do without.
+# The zsh is the one a fresh login session finds (a login shell run with the
+# environment cleared), not one that only this shell's PATH has.
 _df_doctor_check_zsh() {
   local zsh i t0 t1 median
   local -a ms=() limit=() sorted=()
-  if ! zsh="$(command -v zsh 2>/dev/null)"; then
+  zsh="$(_df_doctor_clean -lc 'command -v zsh' | tail -n 1)" || zsh=""
+  case "$zsh" in
+    /*) ;;
+    *) zsh="" ;;
+  esac
+  if [ -z "$zsh" ]; then
     if [ "$1" = minimal ]; then
       _df_doc_ok "zsh: not installed (bash is used)"
     else

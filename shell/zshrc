@@ -51,13 +51,16 @@ bindkey '^R' history-incremental-pattern-search-backward
 # bindings (shell/tools.sh) after it: they save the Tab widget as
 # fzf_default_completion, which must then be fzf-tab-complete. Same gate as fzf in
 # tools.sh: a profile with tools (never minimal, whatever fzf the host has), a
-# terminal on stdin and an fzf on PATH. Vendored, so no download; the
-# optional compiled module is left out and the pure-zsh path is used.
+# terminal on stdin and an fzf that can print its zsh script (0.48 or newer, the
+# condition tools.sh needs for fzf's own init; an older fzf would leave fzf-tab
+# without fzf's bindings). Vendored, so no download; the optional compiled
+# module is left out and the pure-zsh path is used.
 _df_profile=''
 if [[ -r $HOME/.config/dotfiles/profile ]]; then read -r _df_profile <"$HOME/.config/dotfiles/profile" || :; fi
 case $_df_profile in
   server | workstation)
-    if [[ -t 0 && -n ${commands[fzf]:-} && -r "$_df_dir/vendor/fzf-tab/fzf-tab.plugin.zsh" ]]; then
+    if [[ -t 0 && -n ${commands[fzf]:-} && -r "$_df_dir/vendor/fzf-tab/fzf-tab.plugin.zsh" ]] &&
+      fzf --zsh >/dev/null 2>&1; then
       # shellcheck source=/dev/null
       source "$_df_dir/vendor/fzf-tab/fzf-tab.plugin.zsh"
       # Upstream: no zsh menu, so that fzf-tab sees the whole candidate list.

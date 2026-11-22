@@ -36,6 +36,19 @@ for plain in 'https://github.com/org/repo' 'git@github.com:org/repo.git' 'no url
 done
 assert_eq "$(masked 'https://<hidden>@host.example')" 'https://<hidden>@host.example' "masking twice changes nothing"
 
+# The linuxbrew block is the text the user wrote by hand on a real host; with the default prefix
+# the generated body must be byte for byte that text (the markers are checked with the blocks below).
+eval "$(sed -n '/^linuxbrew_body() {/,/^}/p' "$mig")"
+assert_eq "$(linuxbrew_body /home/linuxbrew/.linuxbrew)" "$(cat <<'BODY'
+# The login shell and tools such as screen live only in linuxbrew on this host.
+# Appended last, so system tools win; remove this block once brew is gone.
+case ":$PATH:" in
+  *:/home/linuxbrew/.linuxbrew/bin:*) ;;
+  *) [ -d /home/linuxbrew/.linuxbrew/bin ] && PATH="$PATH:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin" ;;
+esac
+BODY
+)" "the linuxbrew block body with the default prefix is the verified text"
+
 # --- fixture ------------------------------------------------------------------------------
 # History written by the real zsh, which is what the migration will read: its
 # writer puts a backslash before every embedded newline and does not escape the
@@ -301,6 +314,20 @@ EOF
     cat "$fx/short" "$fx/kept" >"$h.hist-expected"
   fi
 
+  # The old login shells put linuxbrew on PATH (guarded by the directory) and source ~/.profile,
+  # once as ~/ and once as $HOME in another file. 2: only a commented-out line, brew is not used.
+  if [ "${V_BREW:-0}" = 1 ]; then
+    {
+      printf '[[ -d /home/linuxbrew/.linuxbrew/bin ]] && eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"\n'
+      printf '[ -f ~/.profile ] && . ~/.profile\n'
+    } >>"$o/shells/bash/bash_profile"
+    {
+      printf '[[ -d /home/linuxbrew/.linuxbrew/bin ]] && eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"\n'
+      printf 'source "$HOME/.profile"\n'
+    } >"$o/shells/zsh/zprofile"
+  elif [ "${V_BREW:-0}" = 2 ]; then
+    printf '# eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"\n' >>"$o/shells/bash/bash_profile"
+  fi
   if [ -n "${V_LOCAL:-}" ]; then local_layer "$h" "$V_LOCAL"; fi
 
   # Not ours and not into the old setup: must survive untouched, and find must
@@ -339,6 +366,26 @@ run_mig() {
   shift
   (cd / && HOME="$h" bash "${MIG:-$mig}" "$@" 2>&1)
 }
+# make_fake_brew <home> [commands...]: a made-up linuxbrew prefix under the home, with stub
+# executables (never a real brew). Default: the login shell brewsh, screen, micro and git; git is
+# also a system tool, which is the point of having it. The prefix is DF_LINUXBREW_PREFIX, the
+# test hook of the migration and the doctor; the "login shell" is the brewsh in it (DF_LOGIN_SHELL).
+make_fake_brew() {
+  local h="$1" c
+  shift
+  [ "$#" -gt 0 ] || set -- brewsh screen micro git
+  mkdir -p "$h/brew/.linuxbrew/bin" "$h/brew/.linuxbrew/sbin"
+  for c in "$@"; do
+    printf '#!/bin/sh\nexit 0\n' >"$h/brew/.linuxbrew/bin/$c"
+    chmod +x "$h/brew/.linuxbrew/bin/$c"
+  done
+}
+# run_brew <home> [args...]: run_mig with the fake prefix as linuxbrew and its zsh as login shell.
+run_brew() {
+  local h="$1"
+  shift
+  DF_LINUXBREW_PREFIX="$h/brew/.linuxbrew" DF_LOGIN_SHELL="$h/brew/.linuxbrew/bin/brewsh" run_mig "$h" "$@"
+}
 gitc() { (cd "$1" && HOME="$1" GIT_CONFIG_NOSYSTEM=1 git config "${@:2}"); }
 gitlist() { (cd "$1" && HOME="$1" GIT_CONFIG_NOSYSTEM=1 git config --list | LC_ALL=C sort); }
 
@@ -369,6 +416,190 @@ shim_line='[ -r "$HOME/.localrc" ] && . "$HOME/.localrc"'
 probe_bash_i() { env -u DOTFILES_DIR HOME="$1" bash -i -c "$2" </dev/null 2>/dev/null; }
 # probe_zsh_i <home> <command>: run it in an interactive zsh on a pty.
 probe_zsh_i() { env -u DOTFILES_DIR HOME="$1" TERM=dumb script -qec "zsh -i -c '$2'" /dev/null </dev/null 2>/dev/null | tr -d '\r'; }
+
+# --- case_linuxbrew: commands that live only in linuxbrew stay reachable --------------------------
+# The old login shells load linuxbrew. A host whose login shell, zsh, screen and micro exist only
+# there lost them on migration, silently. Now the migration carries brew on PATH (appended last)
+# through a marked block in env.local, or, with --drop-linuxbrew, says what will disappear.
+# Runs with --profile minimal: no network, and every command is "only in brew" (nothing provides it).
+blk_begin_brew='# >>> dotfiles: linuxbrew on PATH >>>'
+blk_end_brew='# <<< dotfiles: linuxbrew on PATH <<<'
+# brew_block <prefix>: the block as the migration writes it (the body is the verified text).
+brew_block() {
+  printf '%s\n' "$blk_begin_brew"
+  linuxbrew_body "$1"
+  printf '%s\n' "$blk_end_brew"
+}
+# fresh_login <home> <command>: the output of a login bash that inherits nothing, like ssh or cron.
+fresh_login() {
+  env -i HOME="$1" USER="$(id -un)" PATH=/usr/local/bin:/usr/bin:/bin bash -lc "$2" 2>&1
+}
+
+brew_cases() {
+  local b="$fx/bw" d="$fx/bd" n="$fx/bn" g="$fx/bg" s="$fx/bs" h="$fx/bh" k="$fx/bk" k2="$fx/bk2" y="$fx/by"
+  local pfx out dry rout bk before list p r mode rc
+  local -a extra
+  pfx="$b/brew/.linuxbrew"
+
+  # Default: carry.
+  V_BIG=0 V_BREW=1 make_old_home "$b"
+  make_fake_brew "$b"
+  before="$(tree_hash "$b")"
+  list="$(tree_list "$b")"
+  dry="$(run_brew "$b" --dry-run --profile minimal)" || { printf '%s\n' "$dry" >&2; _fail "dry run with linuxbrew failed"; }
+  assert_eq "$(tree_hash "$b")" "$before" "linuxbrew: the dry run writes nothing"
+  assert_eq "$(tree_list "$b")" "$list" "linuxbrew: the dry run creates nothing"
+  assert_ok "the dry run reports what stays reachable" -- \
+    grep -qF '  linuxbrew: kept on PATH (appended last) — only there: brewsh (login shell), screen, micro' <<<"$dry"
+  assert_fail "git is on the system, so it is not listed" -- grep -qE 'only there:.*git' <<<"$dry"
+  assert_ok "the dry run says where the block goes" -- \
+    grep -qF 'would add linuxbrew on PATH to ~/.config/dotfiles/env.local (new file)' <<<"$dry"
+  assert_eq "$(grep -cF '~/.profile: replaced (backup kept)' <<<"$dry")" 1 "~/.profile is reported once, as replaced"
+  assert_fail "and never as no longer read" -- grep -qF '~/.profile: no longer read' <<<"$dry"
+
+  out="$(run_brew "$b" --profile minimal)" || { printf '%s\n' "$out" >&2; _fail "migrate with linuxbrew failed"; }
+  bk="$(backup_of "$b")"
+  assert_eq "$(cat "$b/.config/dotfiles/env.local")" "$(brew_block "$pfx")" "env.local holds exactly the linuxbrew block"
+  assert_eq "$(fresh_login "$b" 'command -v screen')" "$pfx/bin/screen" "a fresh login finds the brew-only screen"
+  assert_eq "$(fresh_login "$b" 'command -v brewsh')" "$pfx/bin/brewsh" "and the brew-only login shell"
+  assert_eq "$(fresh_login "$b" 'command -v git')" /usr/bin/git "git stays the system one"
+  p="$(fresh_login "$b" 'printf "%s\n" "$PATH"' | tail -n 1)"
+  case "$p" in
+    *":$pfx/bin:$pfx/sbin") ;;
+    *) _fail "brew is the last PATH entries of a fresh login, got: $p" ;;
+  esac
+  case "$p" in
+    *:/usr/bin:*) ;;
+    *) _fail "/usr/bin is on a fresh login's PATH, got: $p" ;;
+  esac
+  assert_eq "$(env HOME="$b" bash -c '. ~/.bashrc; echo ok' 2>&1)" ok "linuxbrew: non-interactive bash prints nothing"
+  assert_eq "$(env HOME="$b" bash -lc 'echo ok' 2>&1)" ok "linuxbrew: login bash prints nothing"
+  assert_eq "$(env HOME="$b" sh -c '. ~/.profile; echo ok' 2>&1)" ok "linuxbrew: sh reading ~/.profile prints nothing"
+  assert_ok "the install's doctor saw brew through the block" -- grep -qE '^OK +PATH: linuxbrew on PATH \(appended last\) through env.local' <<<"$out"
+  (cd / && HOME="$b" bash "$b/.local/bin/dotfiles" uninstall >/dev/null 2>&1) || _fail "dotfiles uninstall failed (linuxbrew)"
+  rout="$(cd / && HOME="$b" bash "$bk/restore.sh" 2>&1)" || { printf '%s\n' "$rout" >&2; _fail "restore.sh failed (linuxbrew)"; }
+  assert_eq "$(tree_hash "$b")" "$before" "linuxbrew: restore.sh brings back the exact state"
+  assert_file_absent "$b/.config/dotfiles/env.local"
+
+  # The same host with --drop-linuxbrew: no block, the report says what goes.
+  V_BIG=0 V_BREW=1 make_old_home "$d"
+  make_fake_brew "$d"
+  before="$(tree_hash "$d")"
+  dry="$(run_brew "$d" --dry-run --profile minimal --drop-linuxbrew)" || { printf '%s\n' "$dry" >&2; _fail "dry run with --drop-linuxbrew failed"; }
+  assert_ok "the drop report lists what will disappear and how to get it back" -- \
+    grep -qF '  linuxbrew: dropped (--drop-linuxbrew) — these commands will disappear: brewsh (login shell), screen, micro; install them with the system package manager, or run again without --drop-linuxbrew' <<<"$dry"
+  assert_fail "no env.local line in the plan" -- grep -qF 'env.local' <<<"$dry"
+  out="$(run_brew "$d" --profile minimal --drop-linuxbrew)" || { printf '%s\n' "$out" >&2; _fail "migrate --drop-linuxbrew failed"; }
+  bk="$(backup_of "$d")"
+  assert_file_absent "$d/.config/dotfiles/env.local"
+  assert_eq "$(fresh_login "$d" 'command -v screen || echo none')" none "after the drop a fresh login has no screen"
+  assert_ok "and the doctor warns about the login shell in brew" -- grep -qE '^WARN +PATH: login shell .*linuxbrew' <<<"$out"
+  (cd / && HOME="$d" bash "$d/.local/bin/dotfiles" uninstall >/dev/null 2>&1) || _fail "dotfiles uninstall failed (drop)"
+  rout="$(cd / && HOME="$d" bash "$bk/restore.sh" 2>&1)" || { printf '%s\n' "$rout" >&2; _fail "restore.sh failed (drop)"; }
+  assert_eq "$(tree_hash "$d")" "$before" "linuxbrew: restore.sh brings back the exact state (drop)"
+
+  # brew is not used by the old shells (a commented-out line only): no word about it, no block.
+  V_BIG=0 V_BREW=2 make_old_home "$n"
+  make_fake_brew "$n"
+  dry="$(run_brew "$n" --dry-run --profile minimal)" || { printf '%s\n' "$dry" >&2; _fail "dry run without brew use failed"; }
+  assert_fail "brew that the old shells do not load is not mentioned" -- grep -qi 'linuxbrew' <<<"$dry"
+  out="$(run_brew "$n" --profile minimal)" || { printf '%s\n' "$out" >&2; _fail "migrate without brew use failed"; }
+  assert_file_absent "$n/.config/dotfiles/env.local"
+  # ... and a brew that is loaded but whose directory is gone is not mentioned either.
+  V_BIG=0 V_BREW=1 make_old_home "$g"
+  dry="$(run_brew "$g" --dry-run --profile minimal)" || { printf '%s\n' "$dry" >&2; _fail "dry run without a brew directory failed"; }
+  assert_fail "a brew prefix that does not exist is not mentioned" -- grep -qi 'linuxbrew' <<<"$dry"
+
+  # Everything brew has is on the system already: nothing to keep.
+  V_BIG=0 V_BREW=1 make_old_home "$s"
+  make_fake_brew "$s" git
+  dry="$(run_brew "$s" --dry-run --profile minimal)" || { printf '%s\n' "$dry" >&2; _fail "dry run with a brew that only has git failed"; }
+  assert_ok "nothing depends on brew" -- grep -qF 'linuxbrew: nothing depends on it' <<<"$dry"
+  assert_fail "so no block is planned" -- grep -qF 'env.local' <<<"$dry"
+
+  # The user already did it by hand (the block is the one the migration knows): left as it is.
+  V_BIG=0 V_BREW=1 make_old_home "$h"
+  make_fake_brew "$h"
+  mkdir -p "$h/.config/dotfiles"
+  { printf '# mine\n'; brew_block "$h/brew/.linuxbrew"; } >"$h/.config/dotfiles/env.local"
+  before="$(tree_hash "$h")"
+  out="$(run_brew "$h" --profile minimal)" || { printf '%s\n' "$out" >&2; _fail "migrate failed (block already there)"; }
+  bk="$(backup_of "$h")"
+  assert_eq "$(grep -cF "$blk_begin_brew" "$h/.config/dotfiles/env.local")" 1 "no second linuxbrew block"
+  assert_ok "the plan says the block is there already" -- grep -qF 'env.local already has linuxbrew on PATH' <<<"$out"
+  assert_ok "and the report says so" -- grep -qF 'linuxbrew: kept on PATH (the block is already in env.local)' <<<"$out"
+  (cd / && HOME="$h" bash "$h/.local/bin/dotfiles" uninstall >/dev/null 2>&1) || _fail "dotfiles uninstall failed (block there)"
+  rout="$(cd / && HOME="$h" bash "$bk/restore.sh" 2>&1)" || { printf '%s\n' "$rout" >&2; _fail "restore.sh failed (block there)"; }
+  assert_eq "$(tree_hash "$h")" "$before" "restore.sh leaves the block that was there"
+
+  # GNUPGHOME and brew both go to env.local: one new file with both blocks, or both appended to an
+  # existing file that lacks a final newline; restore.sh gives back the original bytes either way.
+  V_BIG=0 V_LOCAL=1 V_BREW=1 make_old_home "$k"
+  make_fake_brew "$k"
+  before="$(tree_hash "$k")"
+  dry="$(run_brew "$k" --dry-run --profile minimal)" || { printf '%s\n' "$dry" >&2; _fail "dry run with GNUPGHOME and brew failed"; }
+  assert_eq "$(grep -c 'to ~/.config/dotfiles/env.local (new file)' <<<"$dry")" 2 "both blocks are planned for the new env.local"
+  out="$(run_brew "$k" --profile minimal)" || { printf '%s\n' "$out" >&2; _fail "migrate with GNUPGHOME and brew failed"; }
+  bk="$(backup_of "$k")"
+  assert_eq "$(cat "$k/.config/dotfiles/env.local")" "$(
+    printf '%s\n%s\n%s\n' "$blk_begin_gpg" 'export GNUPGHOME="$HOME/.config/gnupg"' "$blk_end"
+    brew_block "$k/brew/.linuxbrew"
+  )" "env.local holds the GNUPGHOME block and the linuxbrew block"
+  (cd / && HOME="$k" bash "$k/.local/bin/dotfiles" uninstall >/dev/null 2>&1) || _fail "dotfiles uninstall failed (two blocks)"
+  rout="$(cd / && HOME="$k" bash "$bk/restore.sh" 2>&1)" || { printf '%s\n' "$rout" >&2; _fail "restore.sh failed (two blocks)"; }
+  assert_eq "$(tree_hash "$k")" "$before" "restore.sh removes the new env.local with both blocks"
+  assert_file_absent "$k/.config/dotfiles/env.local"
+  V_BIG=0 V_LOCAL=1 V_BREW=1 make_old_home "$k2"
+  make_fake_brew "$k2"
+  mkdir -p "$k2/.config/dotfiles"
+  printf '# mine, no final newline' >"$k2/.config/dotfiles/env.local"
+  before="$(tree_hash "$k2")"
+  out="$(run_brew "$k2" --profile minimal)" || { printf '%s\n' "$out" >&2; _fail "migrate failed (two blocks appended)"; }
+  bk="$(backup_of "$k2")"
+  assert_eq "$(grep -c '^# >>> ' "$k2/.config/dotfiles/env.local")" 2 "both blocks are appended"
+  assert_eq "$(sed -n 1p "$k2/.config/dotfiles/env.local")" "# mine, no final newline" "the user's line stays on its own line"
+  (cd / && HOME="$k2" bash "$k2/.local/bin/dotfiles" uninstall >/dev/null 2>&1) || _fail "dotfiles uninstall failed (two blocks appended)"
+  rout="$(cd / && HOME="$k2" bash "$bk/restore.sh" 2>&1)" || { printf '%s\n' "$rout" >&2; _fail "restore.sh failed (two blocks appended)"; }
+  assert_eq "$(tree_hash "$k2")" "$before" "restore.sh cuts both appended blocks, byte for byte"
+
+  # A symlinked env.local is refused as before, before anything is written.
+  V_BIG=0 V_BREW=1 make_old_home "$y"
+  make_fake_brew "$y"
+  mkdir -p "$y/.config/dotfiles"
+  printf '# real\n' >"$y.win/data/env.real"
+  ln -s "$y.win/data/env.real" "$y/.config/dotfiles/env.local"
+  before="$(tree_hash "$y")"
+  rc=0
+  out="$(run_brew "$y" --profile minimal)" || rc=$?
+  assert_ok "a symlinked env.local is refused" -- test "$rc" -ne 0
+  assert_ok "and the refusal says why" -- grep -qF 'env.local is a symlink' <<<"$out"
+  assert_eq "$(tree_hash "$y")" "$before" "a refused run changes nothing (symlinked env.local)"
+  assert_file_absent "$y/.dotfiles-backup"
+
+  # install.sh runs without brew on PATH when nothing carries it (zsh-bin then sees the host as it
+  # will be) and with the PATH of the caller when the block is written. A copy of the checkout with a
+  # recording install.sh stands in for the real one.
+  cp -a /src "$fx/rec"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$PATH" >"$HOME/.install-path"\n' >"$fx/rec/install.sh"
+  for mode in carry drop; do
+    r="$fx/br-$mode"
+    V_BIG=0 V_BREW=1 make_old_home "$r"
+    make_fake_brew "$r"
+    if [ "$mode" = drop ]; then extra=(--drop-linuxbrew); else extra=(); fi
+    out="$(PATH="$r/brew/.linuxbrew/bin:$PATH" MIG="$fx/rec/tools/migrate-from-nobitagamer.sh" run_brew "$r" --profile minimal ${extra[@]+"${extra[@]}"})" ||
+      { printf '%s\n' "$out" >&2; _fail "migrate with a recording install.sh failed ($mode)"; }
+    if [ "$mode" = carry ]; then
+      case ":$(cat "$r/.install-path"):" in
+        *":$r/brew/.linuxbrew/bin:"*) ;;
+        *) _fail "install.sh keeps brew on PATH when the block carries it" ;;
+      esac
+    else
+      case ":$(cat "$r/.install-path"):" in
+        *":$r/brew/.linuxbrew/"*) _fail "install.sh does not see brew after --drop-linuxbrew" ;;
+      esac
+    fi
+  done
+}
 
 # --- case_profile: --profile picks what is installed; a host that is not WSL has no default ----------
 # Needs no network (minimal installs no tools), so the r9 row runs it with the network off.
@@ -413,6 +644,8 @@ profile_cases() {
   (cd / && HOME="$w" bash "$w/.local/bin/dotfiles" uninstall >/dev/null 2>&1) || _fail "dotfiles uninstall failed (profile minimal)"
   rout="$(cd / && HOME="$w" bash "$bk_w/restore.sh" 2>&1)" || { printf '%s\n' "$rout" >&2; _fail "restore.sh failed (profile minimal)"; }
   assert_eq "$(tree_hash "$w")" "$w_before" "restore.sh brings back the exact state (profile minimal)"
+
+  brew_cases
 }
 
 # The r9 row is not WSL: it only runs the profile case, offline (minimal installs nothing).
@@ -933,6 +1166,20 @@ assert_ok "GNUPGHOME with an odd default is not carried" -- grep -qF 'GNUPGHOME:
 assert_file_absent "$x/.config/dotfiles/env.local"
 assert_ok "HISTFILE that is the migrated history is reported as migrated" -- grep -qF 'HISTFILE: history migrated to ~/.zsh_history' <<<"$out"
 assert_fail "a commented-out source is not reported" -- grep -qF '~/.commented' <<<"$out"
+
+# --- linuxbrew under the workstation profile (the default under WSL) ---------------------------
+# Commands the profile installs are not "only in brew": micro comes with the server tools (and zsh with
+# zsh-bin, which install.sh runs without brew on PATH when nothing carries it). The brew-only
+# login shell and screen are what is left: a reason to carry brew, and what a drop loses.
+bw="$fx/bws"
+V_BIG=0 V_BREW=1 make_old_home "$bw"
+make_fake_brew "$bw"
+dry="$(run_brew "$bw" --dry-run)" || { printf '%s\n' "$dry" >&2; _fail "dry run with linuxbrew (workstation) failed"; }
+assert_ok "workstation: kept, and micro is not listed (the profile has it)" -- \
+  grep -qE 'linuxbrew: kept on PATH \(appended last\) — only there: brewsh \(login shell\), screen$' <<<"$dry"
+dry="$(run_brew "$bw" --dry-run --drop-linuxbrew)" || { printf '%s\n' "$dry" >&2; _fail "dry run --drop-linuxbrew (workstation) failed"; }
+assert_ok "workstation: a drop loses the login shell and screen only (the mise tools cover micro)" -- \
+  grep -qF 'these commands will disappear: brewsh (login shell), screen; install them' <<<"$dry"
 
 profile_cases
 

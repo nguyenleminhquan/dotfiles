@@ -540,6 +540,14 @@ if [ "$has_zsh" = 1 ]; then
     assert_eq "$(zsh_load_order "$(zsh_stub_x)")" "compinit fzf-tab autosuggestions tools" "load order: compinit, fzf-tab, autosuggestions, tools.sh (fzf)"
     assert_eq "$(zsh_stub 'whence -w z')" "z: function" "tools profile zsh: zoxide is initialised"
     assert_ok "and cached" -- test -r "$HOME/.cache/dotfiles/init/zoxide-zsh"
+    # fzf-tab needs an fzf that works: one that cannot print its zsh script (older than 0.48)
+    # is no reason to load it, and tools.sh skips that fzf too, so Tab stays the stock widget.
+    cp -p "$fx/bin/fzf" "$fx/fzf.good"
+    printf '#!/bin/sh\nexit 2\n' >"$fx/bin/fzf"
+    rm -rf ~/.cache/dotfiles/init
+    assert_eq "$(zsh_stub 'print -r -- $+functions[fzf-tab-complete]')" 0 "tools profile with an fzf that has no --zsh: fzf-tab is not loaded"
+    assert_eq "$(zsh_stub 'bindkey "^I"')" '"^I" expand-or-complete' "tools profile with an fzf that has no --zsh: Tab is the stock widget"
+    mv "$fx/fzf.good" "$fx/bin/fzf"
     # fzf-tab needs fzf: a profile with tools but no fzf keeps the stock Tab.
     rm "$fx/bin/fzf"
     assert_eq "$(zsh_stub 'print -r -- $+functions[fzf-tab-complete]')" 0 "tools profile without fzf: fzf-tab is not loaded"

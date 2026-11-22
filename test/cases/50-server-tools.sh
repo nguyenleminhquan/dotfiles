@@ -142,6 +142,9 @@ assert_file_absent "$HOME/.local/share/mise"
 #!/bin/sh
 [ "\$1 \$2" = "completion zsh" ] || exit 1
 printf '%s\n' "\$XDG_CONFIG_HOME" >>"$fx/docker-xdg"
+printf '%s\n' "\${DOCKER_CONFIG:-unset}" >>"$fx/docker-config"
+# A real docker creates its config directory even for \`completion\`.
+mkdir -p "\${DOCKER_CONFIG:-\$HOME/.docker}"
 printf '#compdef docker\n_docker() { :; }\n'
 STUB
   # gh: only `completion -s zsh` works.
@@ -170,6 +173,11 @@ STUB
     "$fx"/.cache/dotfiles.*/config) ;;
     *) _fail "docker ran with a scratch XDG_CONFIG_HOME, got: $(cat "$fx/docker-xdg")" ;;
   esac
+  case "$(cat "$fx/docker-config")" in
+    "$fx"/.cache/dotfiles.*/docker) ;;
+    *) _fail "docker ran with a scratch DOCKER_CONFIG, got: $(cat "$fx/docker-config")" ;;
+  esac
+  assert_file_absent "$fx/.docker"
   assert_eq "$(find "$comp" -mindepth 1 -printf '%f\n' | LC_ALL=C sort | tr '\n' ' ')" "_docker _gh " "only the working completions are left"
   assert_eq "$(find "$fx/.cache" -mindepth 1 -maxdepth 1 -printf '%f\n' | tr '\n' ' ')" "zsh " "the scratch directory is removed"
 

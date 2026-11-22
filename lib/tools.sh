@@ -296,9 +296,10 @@ _df_tool_real() {
 # $DF_COMPLETION_TOOLS that is on PATH, and drop the file of one that is gone.
 # `compinit -C` (see shell/zshrc) never refreshes its dump, so whenever the set
 # of completions changes the dump is deleted and zsh rebuilds it once.
-# The tools run with their XDG directories in a scratch directory: k9s, for one,
-# creates ~/.local/state/k9s even for `completion`, and nothing but the
-# completion file may be left behind by this step.
+# The tools run with their XDG directories (and DOCKER_CONFIG, which docker would
+# otherwise create as ~/.docker) in a scratch directory: k9s, for one, creates
+# ~/.local/state/k9s even for `completion`, and nothing but the completion file
+# may be left behind by this step.
 df_gen_completions() {
   local dir="$HOME/.cache/zsh/completions" tool real out cur changed=0 scratch
   local -a args
@@ -321,7 +322,7 @@ df_gen_completions() {
       gh) args=(completion -s zsh) ;;
       *) args=(completion zsh) ;;
     esac
-    out="$(XDG_STATE_HOME="$scratch/state" XDG_DATA_HOME="$scratch/data" XDG_CONFIG_HOME="$scratch/config" XDG_CACHE_HOME="$scratch/cache" "$real" "${args[@]}" 2>/dev/null)" || out=''
+    out="$(XDG_STATE_HOME="$scratch/state" XDG_DATA_HOME="$scratch/data" XDG_CONFIG_HOME="$scratch/config" XDG_CACHE_HOME="$scratch/cache" DOCKER_CONFIG="$scratch/docker" "$real" "${args[@]}" 2>/dev/null)" || out=''
     case "$out" in
       '#compdef'*) ;;
       *)
