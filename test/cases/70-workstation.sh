@@ -238,6 +238,70 @@ median="$(printf '%s\n' "${times[@]}" | sort -n | sed -n 5p)"
 printf 'zsh -i startup ms: %s (median %s)\n' "${times[*]}" "$median" >&2
 assert_ok "zsh startup median ${median}ms < 600ms" -- test "$median" -lt 600
 
+# WSL1 mode with the real mise (the stub-based checks of every row are in 40-interactive.sh):
+# the install leaves a fresh cache, and shells then make no mise call at start or per prompt.
+cache="$HOME/.cache/dotfiles/mise-env.sh"
+venv="$HOME/python-env/ansible2.16"
+assert_ok "the install left the mise cache" -- test -r "$cache"
+bin_paths="$(cd "$HOME" && bash -lc 'mise bin-paths' | paste -sd: -)"
+assert_eq "$(sed -n 1p "$cache")" "# df-mise-dirs $venv/bin:$bin_paths" "the cache holds the venv and the tool dirs mise puts in front"
+assert_eq "$(sed -n 2p "$cache")" "# df-mise-bin $HOME/.local/bin/mise" "and names the mise that wrote it"
+assert_ok "and the non-PATH variables of the global config" -- grep -qx "export VIRTUAL_ENV=$venv" "$cache"
+assert_eq "$(sed 1,2d "$cache" | grep -c '^export PATH=' || true)" 0 "and no PATH"
+p="$(bash -c '. ~/.bashrc; echo "$PATH"')"
+assert_eq "${p#*:"$HOME"/.local/bin:}" "$venv/bin:$bin_paths" "non-interactive: the real dirs, last, in place of the shims"
+assert_ok "python3 runs from them in a non-interactive login shell" -- grep -q 'Python 3.12.16' <<<"$(bash -lc 'python3 --version' 2>&1)"
+
+# A counting wrapper takes the place of the mise binary (a change of the binary also
+# invalidates the cache, which the first start below shows).
+mise_bin="$HOME/.local/bin/mise"
+mv "$mise_bin" "$mise_bin-real"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"${DF_TEST_MISE_LOG:-/dev/null}"\nexec "%s-real" "$@"\n' "$mise_bin" >"$mise_bin"
+chmod +x "$mise_bin"
+export DF_TEST_MISE_LOG="$HOME/mise-calls"
+n_calls() { if [ -f "$DF_TEST_MISE_LOG" ]; then wc -l <"$DF_TEST_MISE_LOG" | tr -d ' '; else echo 0; fi; }
+: >"$DF_TEST_MISE_LOG"
+zsh_i exit >/dev/null
+assert_eq "$(n_calls)" 1 "a changed mise binary regenerates the cache once"
+: >"$DF_TEST_MISE_LOG"
+assert_eq "$(zsh_i exit)" "" "zsh -i prints nothing"
+bash_i() { pty "DOTFILES_IN_ZSH=1 TERM=xterm-256color bash -i -c '$1'"; }
+assert_eq "$(bash_i true)" "" "bash -i prints nothing"
+assert_eq "$(n_calls)" 0 "zsh -i and bash -i make zero mise calls with a fresh cache"
+assert_eq "$(zsh_i 'print -r -- ${PATH%%:*}')" "$venv/bin" "the venv is in front of PATH"
+n_front=$(($(tr ':' '\n' <<<"$bin_paths" | wc -l) + 1))
+assert_eq "$(zsh_i "print -r -- \${(j.:.)\${(s.:.)PATH}[1,$n_front]}")" "$venv/bin:$bin_paths" "the real tool dirs follow, in the order mise uses"
+assert_eq "$(zsh_i 'print -r -- $VIRTUAL_ENV')" "$venv" "VIRTUAL_ENV is set as activation sets it"
+assert_eq "$(bash_i 'echo $VIRTUAL_ENV')" "$venv" "also in bash"
+assert_eq "$(zsh_i 'print -r -- ${commands[python3]}')" "$venv/bin/python3" "python3 is the venv's, as with activation"
+zsh_i 'for f in $precmd_functions; do $f; done' >/dev/null
+assert_eq "$(n_calls)" 0 "the precmd hooks make zero mise calls"
+assert_eq "$(bash_i 'eval "$PROMPT_COMMAND"')" "" "the PROMPT_COMMAND entries make zero mise calls and print nothing"
+assert_eq "$(n_calls)" 0 "bash: still zero"
+# A project config switches to the real activation.
+mkdir -p "$HOME/proj-test"
+printf '[tools]\n' >"$HOME/proj-test/mise.toml"
+assert_eq "$(zsh_i 'cd ~/proj-test; print -r -- ${+functions[_mise_hook]}')" 1 "zsh: cd into a project directory activates mise"
+assert_ok "and mise was called" -- test "$(n_calls)" -ge 1
+assert_eq "$(zsh_i 'print -r -- ${+functions[_mise_hook]}')" 0 "zsh: and a plain start does not"
+rm -rf "$HOME/proj-test"
+# A touched config regenerates the cache once.
+: >"$DF_TEST_MISE_LOG"
+sleep 1
+touch "$HOME/.config/mise/config.workstation.toml"
+zsh_i exit >/dev/null
+assert_eq "$(n_calls)" 1 "a touched mise config regenerates the cache once"
+zsh_i exit >/dev/null
+assert_eq "$(n_calls)" 1 "and the next start makes no call"
+rm -f "$mise_bin"
+mv "$mise_bin-real" "$mise_bin"
+rm -f "$DF_TEST_MISE_LOG"
+unset DF_TEST_MISE_LOG
+# `dotfiles update` ends with a fresh cache as well.
+rm -f "$cache"
+DOTFILES_SRC="$src" "$HOME/.local/bin/dotfiles" update >/dev/null 2>&1 || _fail "dotfiles update failed"
+assert_ok "dotfiles update rewrote the mise cache" -- test -r "$cache"
+
 # Purge takes back everything the installer did. The venv is the user's own
 # environment (it is what ansible lives in), so it is deliberately left alone.
 # Running the tools made state of their own (opencode, opentofu, starship); that

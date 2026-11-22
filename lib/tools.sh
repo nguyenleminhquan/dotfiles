@@ -344,6 +344,29 @@ df_gen_completions() {
   fi
 }
 
+# df_mise_cache_refresh [profile]: on WSL1, write the cache of the mise environment
+# that shells read instead of running `mise activate` (shell/mise-cache.sh), so that
+# the first shell after an install or an update is already fast. Elsewhere there is
+# nothing to do. A failure only costs the first shell its own regeneration (or a
+# fall back to `mise activate`), so it is a warning.
+df_mise_cache_refresh() {
+  local profile="${1:-server}" mise
+  [ "${DF_WSL:-0}" = 1 ] || return 0
+  mise="$(command -v mise 2>/dev/null)" || return 0
+  # shellcheck source=shell/mise-cache.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/../shell/mise-cache.sh"
+  # The environment a shell of this profile has (shell/env.sh sets MISE_ENV the same way).
+  if (
+    unset MISE_ENV
+    if [ "$profile" = workstation ]; then export MISE_ENV=workstation; fi
+    df_mise_cache_regen "$mise"
+  ); then
+    log_info "cached the mise environment for WSL1 shells"
+  else
+    log_warn "could not cache the mise environment; shells will run mise activate"
+  fi
+}
+
 # df_tools_install [profile]: everything above, in order. No sudo, no network
 # unless something is actually missing.
 df_tools_install() {
@@ -354,7 +377,8 @@ df_tools_install() {
   fi
   PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"
   export PATH
-  df_install_zsh_bin && df_install_mise && df_mise_install "$profile" && df_gen_completions
+  df_install_zsh_bin && df_install_mise && df_mise_install "$profile" && df_gen_completions &&
+    df_mise_cache_refresh "$profile"
 }
 
 # _df_tools_remove_zsh_bin: delete the paths the zsh-bin installer created.
@@ -429,11 +453,12 @@ _df_tools_remove_mise() {
 }
 
 # df_caches_remove: the caches our shell files and installer generate (zsh
-# completions and dump, shell init scripts, the kube prompt cache). The one
-# place that knows them: uninstall.sh and df_tools_remove both call it.
+# completions and dump, shell init scripts, the kube prompt cache, the cached mise
+# environment of WSL1 shells). The one place that knows them: uninstall.sh and
+# df_tools_remove both call it.
 df_caches_remove() {
   rm -rf -- "$HOME/.cache/zsh/completions" "$HOME/.cache/dotfiles/init"
-  rm -f -- "$HOME"/.cache/zsh/zcompdump* "$HOME"/.cache/dotfiles/kube-prompt*
+  rm -f -- "$HOME"/.cache/zsh/zcompdump* "$HOME"/.cache/dotfiles/kube-prompt* "$HOME"/.cache/dotfiles/mise-env.sh*
 }
 
 # df_tools_remove: undo df_tools_install. Removes only what was recorded as

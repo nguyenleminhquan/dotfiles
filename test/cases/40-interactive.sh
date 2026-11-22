@@ -577,6 +577,255 @@ _kubectl" "zsh: the user's own k alias wins, the completion stays"
 fi
 rm -rf "$fx" ~/.cache/dotfiles/init
 
+# --- case_wsl1_mise_mode: no mise process per start or per prompt on WSL1 ------
+# A counting stand-in for mise logs one line per call (the real one is covered by
+# 70-workstation.sh). The WSL1 pretence is DF_PROC_VERSION_FILE, which works on
+# every row. The cache is ~/.cache/dotfiles/mise-env.sh.
+fxw="$(mktemp -d)"
+mkdir -p "$fxw/bin" "$fxw/tools/a" "$fxw/tools/b" "$fxw/venv/bin" "$fxw/plain" "$fxw/proj/sub"
+cat >"$fxw/bin/mise" <<'STUB'
+#!/bin/sh
+# Counting stand-in for mise: one log line per call.
+printf '%s\n' "$*" >>"${DF_TEST_MISE_LOG:?}"
+case "${1:-}" in
+  env)
+    [ -z "${DF_TEST_MISE_FAIL:-}" ] || exit 1
+    if [ -n "${DF_TEST_MISE_DQ:-}" ]; then
+      printf 'export PATH="%s:%s"\n' "$DF_TEST_MISE_DIRS" "$PATH"
+    else
+      printf "export PATH='%s:%s'\n" "$DF_TEST_MISE_DIRS" "$PATH"
+    fi
+    printf 'export VIRTUAL_ENV=%s\n' "$DF_TEST_VENV"
+    ;;
+  activate)
+    printf 'export DF_TEST_ACTIVATED=1\n_mise_hook() { "%s" hook-env; }\n' "$0"
+    case "${2:-}" in
+      zsh) printf 'autoload -Uz add-zsh-hook\nadd-zsh-hook precmd _mise_hook\n' ;;
+      bash) printf 'PROMPT_COMMAND="_mise_hook${PROMPT_COMMAND:+;$PROMPT_COMMAND}"\n' ;;
+    esac
+    ;;
+esac
+STUB
+# Like fzf 0.48+: `fzf --zsh` remembers Tab's widget, then binds Tab itself. Counts its calls.
+cat >"$fxw/bin/fzf" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >>"${DF_TEST_FZF_LOG:?}"
+[ "$1" = --zsh ] || exit 0
+cat <<'ZSH'
+binding=$(bindkey '^I')
+[[ $binding =~ 'undefined-key' ]] || fzf_default_completion=$binding[(s: :w)2]
+unset binding
+fzf-completion() { :; }
+zle -N fzf-completion
+bindkey '^I' fzf-completion
+ZSH
+STUB
+chmod +x "$fxw/bin/mise" "$fxw/bin/fzf"
+printf '[tools]\n' >"$fxw/proj/mise.toml"
+export DF_TEST_MISE_LOG="$fxw/log" DF_TEST_FZF_LOG="$fxw/fzf-log"
+export DF_TEST_VENV="$fxw/venv" DF_TEST_MISE_DIRS="$fxw/venv/bin:$fxw/tools/a:$fxw/tools/b"
+unset DF_TEST_MISE_FAIL
+dirs="$DF_TEST_MISE_DIRS"
+wsl1="/src/test/fixtures/proc-version-wsl1"
+wsl2="$fxw/proc-wsl2"
+printf 'Linux version 5.15.153.1-microsoft-standard-WSL2\n' >"$wsl2"
+cache="$HOME/.cache/dotfiles/mise-env.sh"
+reset_logs() { : >"$fxw/log"; : >"$fxw/fzf-log"; }
+calls() { wc -l <"$1" | tr -d ' '; }
+# wz <zsh code>: interactive zsh on a pty in $WZ_DIR, the proc version file from $PV.
+PV="$wsl1"
+WZ_DIR="$HOME"
+wz() { timeout 30 script -qec "cd '$WZ_DIR' && TERM=xterm-256color PATH='$fxw/bin':\$PATH DF_PROC_VERSION_FILE='$PV' zsh -i -c '$1'" /dev/null </dev/null | tr -d '\r'; }
+# wb <bash lines>: interactive bash reading the lines from a pipe, so PROMPT_COMMAND runs
+# before each of them; what is printed between @@ markers comes back, one per line.
+wb() {
+  printf '%s\nexit\n' "$1" | (cd "$WZ_DIR" && env PATH="$fxw/bin:$PATH" DF_PROC_VERSION_FILE="$PV" DOTFILES_IN_ZSH=1 TERM=xterm-256color bash -i 2>/dev/null || true) |
+    { grep -ao '@@.*@@' || true; } | sed 's/^@@//; s/@@$//'
+}
+# ne <shell> <code>: a non-interactive shell with a bare environment (ssh host cmd), after ~/.bashrc
+# or ~/.zshenv.
+ne() { env -i HOME="$HOME" PATH="$fxw/bin:/usr/bin:/bin" DF_PROC_VERSION_FILE="$PV" "$1" -c "$2"; }
+# path_tail <shell>: what follows ~/.local/bin in the PATH of such a shell (everything before it
+# is the host's business). In bash the start file is sourced by hand, as sshd does.
+path_tail() {
+  local p
+  if [ "$1" = bash ]; then p="$(ne bash '. ~/.bashrc; echo "$PATH"')"; else p="$(ne zsh 'echo "$PATH"')"; fi
+  printf '%s' "${p#*:$HOME/.local/bin:}"
+}
+
+if [ "$DF_PROFILE" = minimal ]; then
+  # Minimal never uses mise: nothing is cached, nothing is called.
+  reset_logs
+  if [ "$has_zsh" = 1 ]; then assert_eq "$(wz 'print -r -- ${+functions[_mise_hook]}')" 0 "minimal zsh on WSL1: no mise activation"; fi
+  assert_eq "$(wb 'echo "@@$(declare -F _mise_hook)@@"')" "" "minimal bash on WSL1: no mise activation"
+  assert_eq "$(calls "$fxw/log")" 0 "minimal on WSL1: mise is never called"
+  assert_file_absent "$cache"
+else
+  if [ "$has_zsh" = 1 ]; then
+    # First start: one mise call writes the cache, which holds the dirs to prepend and the
+    # other exports, never a PATH. The shell has them and has not activated mise.
+    rm -f "$cache"; reset_logs
+    assert_eq "$(wz 'exit')" "" "WSL1 zsh: the first start prints nothing"
+    assert_eq "$(calls "$fxw/log")" 1 "WSL1 zsh: the first start calls mise once (to write the cache)"
+    assert_ok "and that call is mise env" -- grep -q '^env ' "$fxw/log"
+    assert_eq "$(sed -n 1p "$cache")" "# df-mise-dirs $dirs" "the cache's first line lists the dirs to prepend"
+    assert_eq "$(sed -n 2p "$cache")" "# df-mise-bin $fxw/bin/mise" "its second line names the mise that wrote it"
+    assert_ok "the other exports are in it" -- grep -qx "export VIRTUAL_ENV=$fxw/venv" "$cache"
+    assert_eq "$(sed 1,2d "$cache" | grep -c '^export PATH=' || true)" 0 "no PATH of the generating shell is in it"
+    assert_eq "$(wz 'print -r -- ${(j: :)${(s.:.)PATH}[1,3]}')" "$fxw/venv/bin $fxw/tools/a $fxw/tools/b" "WSL1 zsh: the tool dirs are in front of PATH"
+    assert_eq "$(wz 'print -r -- $VIRTUAL_ENV')" "$fxw/venv" "WSL1 zsh: VIRTUAL_ENV comes from the cache"
+    assert_eq "$(wz 'print -r -- ${+functions[_mise_hook]}')" 0 "WSL1 zsh: mise is not activated"
+    # Later starts and the prompt hooks make no mise call at all.
+    reset_logs
+    wz 'exit' >/dev/null
+    assert_eq "$(calls "$fxw/log")" 0 "WSL1 zsh: a start with a fresh cache makes zero mise calls"
+    wz 'for f in $precmd_functions; do $f; done' >/dev/null
+    assert_eq "$(calls "$fxw/log")" 0 "WSL1 zsh: the precmd hooks make zero mise calls"
+    # A mise project config switches to the normal activation, at start or after a cd.
+    assert_eq "$(wz "cd $fxw/proj/sub; print -r -- \${+functions[_mise_hook]} \${DF_TEST_ACTIVATED:-none}")" "1 1" "WSL1 zsh: cd into a project switches to mise activate"
+    assert_ok "and activate was called" -- grep -q '^activate zsh' "$fxw/log"
+    assert_eq "$(wz "cd $fxw/proj/sub; print -r -- \${chpwd_functions[(r)_df_mise_chpwd]:-gone}")" gone "WSL1 zsh: our chpwd hook is gone after the switch"
+    assert_eq "$(wz "cd $fxw/proj; print -r -- \${+functions[_mise_hook]}")" 1 "WSL1 zsh: the project directory itself counts"
+    reset_logs
+    assert_eq "$(wz "cd $fxw/plain; print -r -- \${+functions[_mise_hook]}")" 0 "WSL1 zsh: cd into a plain directory stays cached"
+    assert_eq "$(calls "$fxw/log")" 0 "WSL1 zsh: and calls no mise"
+    WZ_DIR="$fxw/proj/sub"
+    reset_logs
+    assert_eq "$(wz 'print -r -- ${+functions[_mise_hook]}')" 1 "WSL1 zsh: started inside a project: activated"
+    assert_eq "$(grep -c '^env ' "$fxw/log" || true)" 0 "WSL1 zsh: and the cache is not touched for it"
+    WZ_DIR="$HOME"
+    # The global config under ~/.config/mise is no project config, neither at $HOME nor inside it.
+    mkdir -p ~/.config/mise
+    printf '[settings]\n' >~/.config/mise/config.toml
+    assert_eq "$(wz 'cd ~/.config/mise; print -r -- ${+functions[_mise_hook]}')" 0 "WSL1 zsh: ~/.config/mise is not a project"
+    assert_eq "$(wz 'cd ~; print -r -- ${+functions[_mise_hook]}')" 0 "WSL1 zsh: \$HOME with a global config is not a project"
+    assert_eq "$(wz 'cd ~/.config; print -r -- ${+functions[_mise_hook]}')" 0 "WSL1 zsh: ~/.config is not a project either"
+    printf '[tools]\n' >~/mise.toml
+    assert_eq "$(wz 'cd ~; print -r -- ${+functions[_mise_hook]}')" 1 "WSL1 zsh: a mise.toml in \$HOME is a project config"
+    rm -f ~/mise.toml ~/.config/mise/config.toml
+    # Staleness: a touched config, then a new install, each regenerate once.
+    wz 'exit' >/dev/null # fresh again
+    sleep 1
+    touch ~/.config/mise/conf.d/dotfiles.toml
+    reset_logs
+    wz 'exit' >/dev/null
+    assert_eq "$(calls "$fxw/log")" 1 "WSL1 zsh: a touched mise config regenerates the cache once"
+    wz 'exit' >/dev/null
+    assert_eq "$(calls "$fxw/log")" 1 "WSL1 zsh: and the next start makes no call"
+    sleep 1
+    mkdir -p ~/.local/share/mise/installs/stubtool/1.0
+    reset_logs
+    wz 'exit' >/dev/null
+    assert_eq "$(calls "$fxw/log")" 1 "WSL1 zsh: a new tool install regenerates the cache once"
+    wz 'exit' >/dev/null
+    assert_eq "$(calls "$fxw/log")" 1 "WSL1 zsh: and then it is fresh again"
+    # A mise that cannot print its environment: back to mise activate, silently, no cache left.
+    rm -f "$cache"; reset_logs
+    export DF_TEST_MISE_FAIL=1
+    assert_eq "$(wz 'print -r -- ${+functions[_mise_hook]}')" 1 "WSL1 zsh: a failing mise env falls back to mise activate (silently)"
+    unset DF_TEST_MISE_FAIL
+    assert_file_absent "$cache"
+    assert_eq "$(ls ~/.cache/dotfiles | grep -c mise-env || true)" 0 "no temporary file is left behind"
+    # A PATH line in any other form than the plain single-quoted one is refused too: sourced from the
+    # cache it would replace the whole PATH of the shell.
+    rm -f "$cache"; reset_logs
+    export DF_TEST_MISE_DQ=1
+    assert_eq "$(wz 'print -r -- ${+functions[_mise_hook]}')" 1 "WSL1 zsh: a PATH line mise prints in another form falls back to mise activate"
+    unset DF_TEST_MISE_DQ
+    assert_file_absent "$cache"
+    # Native Linux and WSL2: mise activate as always, nothing cached.
+    for PV in /nonexistent "$wsl2"; do
+      rm -f "$cache"; reset_logs
+      assert_eq "$(wz 'print -r -- ${+functions[_mise_hook]}')" 1 "zsh without WSL1 ($PV): mise is activated"
+      assert_ok "and activate ran" -- grep -q '^activate zsh' "$fxw/log"
+      assert_eq "$(grep -c '^env ' "$fxw/log" || true)" 0 "zsh without WSL1 ($PV): no cache is generated"
+      assert_file_absent "$cache"
+    done
+    PV="$wsl1"
+  fi
+
+  # bash does the same through a PROMPT_COMMAND entry.
+  rm -f "$cache"; reset_logs
+  assert_eq "$(wb 'echo "@@$(declare -F _mise_hook)@@"')" "" "WSL1 bash: not activated"
+  assert_eq "$(calls "$fxw/log")" 1 "WSL1 bash: the first start calls mise once"
+  reset_logs
+  assert_eq "$(wb 'IFS=: read -ra p <<<"$PATH"; echo "@@${p[0]} ${p[1]} ${p[2]}@@"; echo "@@$VIRTUAL_ENV@@"')" "$fxw/venv/bin $fxw/tools/a $fxw/tools/b
+$fxw/venv" "WSL1 bash: tool dirs in front and VIRTUAL_ENV from the cache"
+  assert_eq "$(calls "$fxw/log")" 0 "WSL1 bash: a start with a fresh cache and its prompts make zero mise calls"
+  assert_eq "$(wb 'cd '"$fxw"'/proj/sub
+echo "@@$(declare -F _mise_hook) ${DF_TEST_ACTIVATED:-none}@@"')" "_mise_hook 1" "WSL1 bash: cd into a project switches to mise activate"
+  assert_ok "and activate was called" -- grep -q '^activate bash' "$fxw/log"
+  reset_logs
+  assert_eq "$(wb 'cd '"$fxw"'/plain
+echo "@@$(declare -F _mise_hook)@@"')" "" "WSL1 bash: cd into a plain directory stays cached"
+  assert_eq "$(calls "$fxw/log")" 0 "WSL1 bash: and calls no mise"
+  # The entry hands the status of the last command on to the next one, whether the directory
+  # changed (the hook does its work) or not. Called by hand, as the distributions' own entries
+  # in front of it (the title of Rocky's /etc/bashrc) would change the status first.
+  assert_eq "$(wb '_df_mise_pwd=elsewhere; (exit 3); _df_mise_prompt; echo "@@rc=$?@@"
+(exit 4); _df_mise_prompt; echo "@@rc=$?@@"')" "rc=3
+rc=4" "WSL1 bash: the prompt hook hands the exit status on"
+  reset_logs
+  WZ_DIR="$fxw/proj"
+  assert_eq "$(wb 'echo "@@$(declare -F _mise_hook)@@"')" "_mise_hook" "WSL1 bash: started inside a project: activated"
+  WZ_DIR="$HOME"
+  # Non-interactive shells: the real dirs replace the shims, appended last, nothing printed, no mise.
+  wb 'true' >/dev/null
+  sleep 1
+  touch ~/.config/mise/conf.d/dotfiles.toml
+  wb 'true' >/dev/null # regenerates
+  reset_logs
+  assert_eq "$(path_tail bash)" "$dirs" "WSL1 non-interactive bash: the real tool dirs come last, in place of the shims"
+  assert_eq "$(ne bash '. ~/.bashrc; echo ok')" ok "WSL1 non-interactive bash prints nothing"
+  assert_eq "$(ne bash '. ~/.bashrc; echo "${VIRTUAL_ENV:-unset}"')" unset "WSL1 non-interactive bash: only the dirs are applied, no other export"
+  if [ "$has_zsh" = 1 ]; then
+    assert_eq "$(path_tail zsh)" "$dirs" "WSL1 non-interactive zsh: the real tool dirs come last"
+    assert_eq "$(ne zsh 'echo ok')" ok "WSL1 non-interactive zsh prints nothing"
+  fi
+  assert_eq "$(calls "$fxw/log")" 0 "WSL1 non-interactive shells never call mise"
+  sleep 1
+  touch ~/.config/mise/conf.d/dotfiles.toml
+  assert_eq "$(path_tail bash)" "$HOME/.local/share/mise/shims" "WSL1 non-interactive bash with a stale cache: the shims, as before"
+  if [ "$has_zsh" = 1 ]; then
+    assert_eq "$(path_tail zsh)" "$HOME/.local/share/mise/shims" "WSL1 non-interactive zsh with a stale cache: the shims"
+  fi
+  assert_eq "$(calls "$fxw/log")" 0 "and still no mise call"
+  PV=/nonexistent
+  rm -f "$cache"
+  assert_eq "$(path_tail bash)" "$HOME/.local/share/mise/shims" "native non-interactive bash: the shims"
+  reset_logs
+  assert_eq "$(wb 'echo "@@$(declare -F _mise_hook)@@"')" "_mise_hook" "native bash: mise activate runs"
+  assert_ok "and activate was called" -- grep -q '^activate bash' "$fxw/log"
+  assert_file_absent "$cache"
+  PV="$wsl1"
+
+  # case_fzf_tab_gate_without_a_process: the cache of tools.sh decides, not `fzf --zsh`.
+  if [ "$has_zsh" = 1 ]; then
+    PV=/nonexistent
+    rm -rf ~/.cache/dotfiles/init; reset_logs
+    assert_eq "$(wz 'print -r -- $+functions[fzf-tab-complete]')" 1 "fzf-tab gate without a cache: the old check runs once and fzf-tab loads"
+    assert_ok "and that start wrote fzf's init cache" -- grep -qx "# df-init bin=$fxw/bin/fzf" "$HOME/.cache/dotfiles/init/fzf-zsh"
+    cp -p "$HOME/.cache/dotfiles/init/fzf-zsh" "$fxw/fzf-zsh.saved"
+    reset_logs
+    assert_eq "$(wz 'print -r -- $+functions[fzf-tab-complete]')" 1 "fzf-tab gate with the cache: fzf-tab is loaded"
+    assert_eq "$(calls "$fxw/fzf-log")" 0 "fzf-tab gate with the cache: zsh -i runs fzf zero times"
+    assert_eq "$(wz 'bindkey "^I"')" '"^I" fzf-completion' "fzf's bindings still come last"
+    assert_eq "$(wz 'print -r -- $fzf_default_completion')" fzf-tab-complete "fzf still falls back to fzf-tab"
+    assert_eq "$(wz 'zstyle -L ":completion:*" menu')" "zstyle ':completion:*' menu no" "fzf-tab still sees the whole list"
+    assert_eq "$(cat "$HOME/.cache/dotfiles/init/fzf-zsh")" "$(cat "$fxw/fzf-zsh.saved")" "the gate does not touch the cache"
+    assert_eq "$(zsh_load_order "$(timeout 30 script -qec "TERM=xterm-256color PATH='$fxw/bin':\$PATH zsh -i -x -c exit" /dev/null </dev/null | tr -d '\r')")" "compinit fzf-tab autosuggestions tools" "the load order is unchanged"
+    # A cache whose binary is gone proves nothing: the old check decides, and tools.sh re-keys the cache.
+    { printf '# df-init bin=%s/gone/fzf\n' "$fxw"; sed 1d "$fxw/fzf-zsh.saved"; } >"$HOME/.cache/dotfiles/init/fzf-zsh"
+    reset_logs
+    assert_eq "$(wz 'print -r -- $+functions[fzf-tab-complete]')" 1 "fzf-tab gate with a cache of a vanished binary: the old check loads fzf-tab"
+    assert_ok "and fzf was run" -- test "$(calls "$fxw/fzf-log")" -ge 1
+    assert_ok "and the cache points at the fzf in use again" -- grep -qx "# df-init bin=$fxw/bin/fzf" "$HOME/.cache/dotfiles/init/fzf-zsh"
+    PV="$wsl1"
+  fi
+fi
+rm -rf "$fxw" ~/.cache/dotfiles/init "$cache" ~/.local/share/mise
+unset DF_TEST_MISE_LOG DF_TEST_FZF_LOG DF_TEST_VENV DF_TEST_MISE_DIRS DF_TEST_MISE_FAIL DF_TEST_MISE_DQ
+
 # --- non-interactive stays silent with the full bashrc ------------------------
 assert_eq "$(bash -c '. ~/.bashrc; echo ok' 2>&1)" "ok" "ssh-like bashrc still silent and stderr-clean"
 assert_eq "$(bash -lc 'echo ok' 2>&1)" "ok" "bash -lc still silent"

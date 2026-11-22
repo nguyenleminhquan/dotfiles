@@ -101,6 +101,12 @@ dotfiles uninstall --purge --force  # ... even if the checkout holds unsaved wor
   the file to switch back).
 - Non-interactive shells never print anything and never switch to zsh; they see
   `~/.local/bin` and the mise shims only at the end of `PATH`.
+- WSL1 starts processes slowly (mise alone takes about 0.6 s), so there interactive
+  shells do not run `mise activate`: no mise process runs at start or per prompt,
+  they read a cached environment (`~/.cache/dotfiles/mise-env.sh`) instead. A project
+  `mise.toml` switches the shell to normal activation. `dotfiles update`, or any
+  change to the mise config, refreshes the cache. WSL2 starts processes natively
+  and is the real fix for slow starts.
 
 ## Local layer
 

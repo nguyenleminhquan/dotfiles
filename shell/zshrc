@@ -55,16 +55,31 @@ bindkey '^R' history-incremental-pattern-search-backward
 # condition tools.sh needs for fzf's own init; an older fzf would leave fzf-tab
 # without fzf's bindings). Vendored, so no download; the optional compiled
 # module is left out and the pure-zsh path is used.
+# The last condition is read from the init cache that tools.sh keeps
+# (~/.cache/dotfiles/init/fzf-zsh, first line "# df-init bin=<path>"): the file
+# exists only when that fzf printed its script, so an executable recorded binary
+# answers it without running fzf, which costs a process (and, through a mise shim,
+# several). The gate only reads the cache: tools.sh keys it on the binary it finds
+# after mise is set up, and a second writer would make the two re-key it back and
+# forth. Without a usable cache (the first start after an install, or a binary that
+# moved) the check is run instead, once.
 _df_profile=''
 if [[ -r $HOME/.config/dotfiles/profile ]]; then read -r _df_profile <"$HOME/.config/dotfiles/profile" || :; fi
 case $_df_profile in
   server | workstation)
-    if [[ -t 0 && -n ${commands[fzf]:-} && -r "$_df_dir/vendor/fzf-tab/fzf-tab.plugin.zsh" ]] &&
-      fzf --zsh >/dev/null 2>&1; then
-      # shellcheck source=/dev/null
-      source "$_df_dir/vendor/fzf-tab/fzf-tab.plugin.zsh"
-      # Upstream: no zsh menu, so that fzf-tab sees the whole candidate list.
-      zstyle ':completion:*' menu no
+    if [[ -t 0 && -r "$_df_dir/vendor/fzf-tab/fzf-tab.plugin.zsh" ]]; then
+      _df_fzf_init=''
+      if [[ -r $HOME/.cache/dotfiles/init/fzf-zsh ]]; then
+        read -r _df_fzf_init <"$HOME/.cache/dotfiles/init/fzf-zsh" || :
+      fi
+      if [[ $_df_fzf_init == '# df-init bin='* && -x ${_df_fzf_init#'# df-init bin='} ]] ||
+        { [[ -n ${commands[fzf]:-} ]] && fzf --zsh >/dev/null 2>&1; }; then
+        # shellcheck source=/dev/null
+        source "$_df_dir/vendor/fzf-tab/fzf-tab.plugin.zsh"
+        # Upstream: no zsh menu, so that fzf-tab sees the whole candidate list.
+        zstyle ':completion:*' menu no
+      fi
+      unset _df_fzf_init
     fi
     ;;
 esac
