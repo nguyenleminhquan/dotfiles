@@ -276,6 +276,10 @@ printf 'PATH="$PATH:%s/bin"\n' "$brew" >"$fx/etc-environment"
 out="$(DF_LINUXBREW_PREFIX="$brew" DF_ETC_ENVIRONMENT_FILE="$fx/etc-environment" probe_doctor)"
 assert_ok "a PATH line with a variable in it is ignored" -- grep -Eq '^OK +PATH: no linuxbrew|^WARN +PATH: .*/etc/environment' <<<"$out"
 assert_eq "$(grep -c '^FAIL' <<<"$out" || true)" 0 "and is no FAIL"
+# A comment in /etc/environment that mentions linuxbrew is not a PATH entry.
+printf '# linuxbrew was removed from here\nPATH="/usr/local/bin:/usr/bin:/bin"\n' >"$fx/etc-environment"
+out="$(DF_LINUXBREW_PREFIX="$brew" DF_ETC_ENVIRONMENT_FILE="$fx/etc-environment" probe_doctor)"
+assert_ok "a commented linuxbrew line in /etc/environment is no WARN" -- grep -Eq '^OK +PATH: no linuxbrew' <<<"$out"
 rm -f "$fx/etc-environment"
 
 # A login shell that lives in brew while a fresh session has no brew: its owner cannot log in

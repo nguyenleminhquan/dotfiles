@@ -146,8 +146,8 @@ by its git origin or its `.dots` file and refuses anything else. `--profile
 minimal|server|workstation` picks what gets installed; it defaults to
 `workstation` under WSL and is mandatory on any other host (a server must not
 get the workstation tools), and a missing one is refused before anything is
-changed. `--drop-linuxbrew` opts out of keeping linuxbrew on `PATH` (see the
-Linuxbrew item below).
+changed. `--keep-linuxbrew` always keeps linuxbrew on `PATH`, `--drop-linuxbrew`
+never does (the two exclude each other; see the Linuxbrew item below).
 
 1. Dry run first. It writes nothing and prints the plan: what is backed up, the
    symlinks that point into the old checkout, how much of the zsh history would
@@ -196,11 +196,18 @@ What happens to the old local layer:
   If the list is not empty, the marked block of [Local layer](#local-layer) goes into
   `~/.config/dotfiles/env.local` (same rules as `GNUPGHOME`: created, or appended once, or
   left alone when already there), so those commands stay reachable and system tools still
-  win. The report says `linuxbrew: kept on PATH (appended last) — only there: ...`.
-  With `--drop-linuxbrew` nothing is written and the report says `linuxbrew: dropped
-  (--drop-linuxbrew) — these commands will disappear: ...`; get them back with system
-  packages, or run again without the flag. Linuxbrew itself is never touched, and
-  `restore.sh` removes the block like any other.
+  win. The same happens when something install.sh needs (`curl`, `tar`, `git` for the
+  profile or `DOTFILES_REPO`) exists only in brew, and when the block is in `env.local`
+  already. The report says `linuxbrew: kept on PATH (appended last) — only there: ...`.
+  `--keep-linuxbrew` writes the block even when that list is empty. When brew is not kept
+  (nothing depends on it, or `--drop-linuxbrew`) nothing is written, install.sh runs
+  without brew on its `PATH`, and the report counts and names every command in the brew
+  `bin` directory that a new terminal will lose (the first 15, then `(+N more)`; the login
+  shell is named when it lives there and keeps working by its absolute path), ending with
+  `use --keep-linuxbrew to keep them on PATH`. With `--drop-linuxbrew` the run is refused,
+  before anything is changed, when `curl` or `tar` (server, workstation) exist only in
+  brew. Linuxbrew itself is never touched, and `restore.sh` removes the block like any
+  other.
 - **Report.** The old shell files are scanned (the old checkout only, no walk of
   your home) for files they source or test and for variables that relocate
   state (`GNUPGHOME`, `ZDOTDIR`, `HISTFILE`, `XDG_*_HOME`). Each file that exists

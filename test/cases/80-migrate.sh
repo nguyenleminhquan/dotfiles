@@ -384,7 +384,7 @@ make_fake_brew() {
 run_brew() {
   local h="$1"
   shift
-  DF_LINUXBREW_PREFIX="$h/brew/.linuxbrew" DF_LOGIN_SHELL="$h/brew/.linuxbrew/bin/brewsh" run_mig "$h" "$@"
+  DF_LINUXBREW_PREFIX="$h/brew/.linuxbrew" DF_LOGIN_SHELL="${BREW_LOGIN_SHELL:-$h/brew/.linuxbrew/bin/brewsh}" run_mig "$h" "$@"
 }
 gitc() { (cd "$1" && HOME="$1" GIT_CONFIG_NOSYSTEM=1 git config "${@:2}"); }
 gitlist() { (cd "$1" && HOME="$1" GIT_CONFIG_NOSYSTEM=1 git config --list | LC_ALL=C sort); }
@@ -487,7 +487,7 @@ brew_cases() {
   before="$(tree_hash "$d")"
   dry="$(run_brew "$d" --dry-run --profile minimal --drop-linuxbrew)" || { printf '%s\n' "$dry" >&2; _fail "dry run with --drop-linuxbrew failed"; }
   assert_ok "the drop report lists what will disappear and how to get it back" -- \
-    grep -qF '  linuxbrew: dropped (--drop-linuxbrew) — these commands will disappear: brewsh (login shell), screen, micro; install them with the system package manager, or run again without --drop-linuxbrew' <<<"$dry"
+    grep -qF "  linuxbrew: dropped (--drop-linuxbrew) — 3 commands will disappear: brewsh, micro, screen; login shell stays $d/brew/.linuxbrew/bin/brewsh by absolute path; install them with the system package manager, or use --keep-linuxbrew to keep them on PATH" <<<"$dry"
   assert_fail "no env.local line in the plan" -- grep -qF 'env.local' <<<"$dry"
   out="$(run_brew "$d" --profile minimal --drop-linuxbrew)" || { printf '%s\n' "$out" >&2; _fail "migrate --drop-linuxbrew failed"; }
   bk="$(backup_of "$d")"
@@ -601,6 +601,93 @@ brew_cases() {
   done
 }
 
+# --- case_keep_linuxbrew: --keep-linuxbrew, and a report that counts what really disappears ---------
+# A real WSL dry run said "nothing depends on it" for a host whose login shell, brew, gomplate ... live
+# only in linuxbrew: the candidate list (doctor packages, zsh, micro, nano) is narrower than that.
+keep_cases() {
+  local kp="$fx/kp" kb="$fx/kb" ac="$fx/ba" at="$fx/bt" ak="$fx/bk3" ae="$fx/be" before out dry rc bk i
+  local pfx
+
+  # --keep-linuxbrew with nothing on the candidate list: the block is written all the same, and
+  # install.sh keeps brew on its PATH. A recording install.sh stands in for the real one.
+  V_BIG=0 V_BREW=1 make_old_home "$kp"
+  make_fake_brew "$kp" git
+  pfx="$kp/brew/.linuxbrew"
+  before="$(tree_hash "$kp")"
+  dry="$(run_brew "$kp" --dry-run --profile minimal --keep-linuxbrew)" || { printf '%s\n' "$dry" >&2; _fail "dry run with --keep-linuxbrew failed"; }
+  assert_ok "--keep-linuxbrew plans the block with an empty candidate list" -- \
+    grep -qF 'would add linuxbrew on PATH to ~/.config/dotfiles/env.local (new file)' <<<"$dry"
+  assert_ok "and the report says kept" -- grep -qF 'linuxbrew: kept on PATH (appended last' <<<"$dry"
+  assert_fail "and install.sh keeps its PATH" -- grep -qF 'taken off its PATH' <<<"$dry"
+  assert_eq "$(tree_hash "$kp")" "$before" "--keep-linuxbrew: the dry run writes nothing"
+  out="$(PATH="$pfx/bin:$PATH" MIG="$fx/rec/tools/migrate-from-nobitagamer.sh" run_brew "$kp" --profile minimal --keep-linuxbrew)" ||
+    { printf '%s\n' "$out" >&2; _fail "migrate --keep-linuxbrew failed"; }
+  bk="$(backup_of "$kp")"
+  assert_eq "$(cat "$kp/.config/dotfiles/env.local")" "$(brew_block "$pfx")" "--keep-linuxbrew writes the block"
+  case ":$(cat "$kp/.install-path"):" in
+    *":$pfx/bin:"*) ;;
+    *) _fail "install.sh keeps brew on PATH with --keep-linuxbrew" ;;
+  esac
+  rm -f "$kp/.install-path"
+  rout="$(cd / && HOME="$kp" bash "$bk/restore.sh" 2>&1)" || { printf '%s\n' "$rout" >&2; _fail "restore.sh failed (--keep-linuxbrew)"; }
+  assert_eq "$(tree_hash "$kp")" "$before" "restore.sh removes the block --keep-linuxbrew wrote"
+
+  # Both flags contradict each other: refused with the usage, before anything is changed.
+  V_BIG=0 V_BREW=1 make_old_home "$kb"
+  make_fake_brew "$kb"
+  before="$(tree_hash "$kb")"
+  for i in "" --dry-run; do
+    rc=0
+    out="$(run_brew "$kb" --profile minimal --keep-linuxbrew --drop-linuxbrew ${i:+"$i"})" || rc=$?
+    assert_ok "--keep-linuxbrew with --drop-linuxbrew is refused (${i:-real run})" -- test "$rc" -ne 0
+    assert_ok "and says why (${i:-real run})" -- grep -qF -- '--keep-linuxbrew and --drop-linuxbrew exclude each other' <<<"$out"
+  done
+  assert_eq "$(tree_hash "$kb")" "$before" "the refused run changed nothing"
+  assert_file_absent "$kb/.dotfiles-backup"
+
+  # Not kept (the login shell is a system tool here, so the candidate list is empty): the report
+  # names what really disappears, the login shell, and the way out. Needs a system zsh (both rows have one).
+  if [ -x /usr/bin/zsh ] || [ -x /bin/zsh ]; then
+    V_BIG=0 V_BREW=1 make_old_home "$ac"
+    make_fake_brew "$ac" zsh brew gomplate git
+    dry="$(BREW_LOGIN_SHELL="$ac/brew/.linuxbrew/bin/zsh" run_brew "$ac" --dry-run --profile minimal)" || { printf '%s\n' "$dry" >&2; _fail "dry run (accurate report) failed"; }
+    assert_ok "the report counts and names what disappears" -- \
+      grep -qF 'linuxbrew: not kept on PATH — 2 commands will disappear: brew, gomplate;' <<<"$dry"
+    assert_ok "names the login shell" -- grep -qF "login shell stays $ac/brew/.linuxbrew/bin/zsh by absolute path" <<<"$dry"
+    assert_ok "and suggests the flag" -- grep -qF 'use --keep-linuxbrew to keep them on PATH' <<<"$dry"
+    assert_fail "it never claims nothing depends on brew" -- grep -qF 'nothing depends on it' <<<"$dry"
+    assert_ok "the install line says what taking brew off PATH costs" -- grep -qF 'linuxbrew taken off its PATH: 2 commands will disappear' <<<"$dry"
+    # A long list is cut after 15 names.
+    V_BIG=0 V_BREW=1 make_old_home "$at"
+    make_fake_brew "$at" zsh brew c01 c02 c03 c04 c05 c06 c07 c08 c09 c10 c11 c12 c13 c14 c15 c16 c17 c18
+    dry="$(BREW_LOGIN_SHELL="$at/brew/.linuxbrew/bin/zsh" run_brew "$at" --dry-run --profile minimal)" || { printf '%s\n' "$dry" >&2; _fail "dry run (long list) failed"; }
+    assert_ok "a long list is counted and cut after 15 names" -- \
+      grep -qF '19 commands will disappear: brew, c01, c02, c03, c04, c05, c06, c07, c08, c09, c10, c11, c12, c13, c14 (+4 more);' <<<"$dry"
+  fi
+
+  # The block is in env.local already (put there by hand) and nothing else would keep brew: install.sh
+  # must still see brew, and the report must not say it is dropped.
+  V_BIG=0 V_BREW=1 make_old_home "$ak"
+  make_fake_brew "$ak" git
+  mkdir -p "$ak/.config/dotfiles"
+  { printf '# mine\n'; brew_block "$ak/brew/.linuxbrew"; } >"$ak/.config/dotfiles/env.local"
+  out="$(PATH="$ak/brew/.linuxbrew/bin:$PATH" MIG="$fx/rec/tools/migrate-from-nobitagamer.sh" run_brew "$ak" --profile minimal)" ||
+    { printf '%s\n' "$out" >&2; _fail "migrate with the block already there (empty list) failed"; }
+  case ":$(cat "$ak/.install-path"):" in
+    *":$ak/brew/.linuxbrew/bin:"*) ;;
+    *) _fail "install.sh keeps brew on PATH while env.local holds the block" ;;
+  esac
+  assert_fail "the report does not say brew is not kept" -- grep -qF 'not kept on PATH' <<<"$out"
+  assert_ok "it says the block is already there" -- grep -qF 'the block is already in env.local' <<<"$out"
+
+  # A git value that holds a terminal escape must not reach the output as one.
+  V_BIG=0 make_old_home "$ae"
+  printf '[x]\n\tprompt = \033(B\033[m\n' >>"$ae/.dotfiles/development/git/gitconfig"
+  dry="$(run_mig "$ae" --dry-run --profile minimal)" || { printf '%s\n' "$dry" >&2; _fail "dry run with an escape in a git value failed"; }
+  assert_fail "the dry run prints no escape byte when stdout is not a terminal" -- grep -q $'\e' <<<"$dry"
+  assert_ok "the value is still shown, escape neutralised" -- grep -qF 'x.prompt = ^[(B^[[m' <<<"$dry"
+}
+
 # --- case_profile: --profile picks what is installed; a host that is not WSL has no default ----------
 # Needs no network (minimal installs no tools), so the r9 row runs it with the network off.
 profile_cases() {
@@ -646,6 +733,7 @@ profile_cases() {
   assert_eq "$(tree_hash "$w")" "$w_before" "restore.sh brings back the exact state (profile minimal)"
 
   brew_cases
+  keep_cases
 }
 
 # The r9 row is not WSL: it only runs the profile case, offline (minimal installs nothing).
@@ -1178,8 +1266,8 @@ dry="$(run_brew "$bw" --dry-run)" || { printf '%s\n' "$dry" >&2; _fail "dry run 
 assert_ok "workstation: kept, and micro is not listed (the profile has it)" -- \
   grep -qE 'linuxbrew: kept on PATH \(appended last\) — only there: brewsh \(login shell\), screen$' <<<"$dry"
 dry="$(run_brew "$bw" --dry-run --drop-linuxbrew)" || { printf '%s\n' "$dry" >&2; _fail "dry run --drop-linuxbrew (workstation) failed"; }
-assert_ok "workstation: a drop loses the login shell and screen only (the mise tools cover micro)" -- \
-  grep -qF 'these commands will disappear: brewsh (login shell), screen; install them' <<<"$dry"
+assert_ok "workstation: a drop loses brewsh and screen only (the mise tools cover micro)" -- \
+  grep -qF '2 commands will disappear: brewsh, screen; login shell stays' <<<"$dry"
 
 # Without brew on its PATH install.sh needs curl and tar (server and workstation download tools):
 # when one of them exists only in the brew prefix, a drop would let install.sh die after the
@@ -1208,6 +1296,18 @@ done
 assert_eq "$(tree_hash "$bc")" "$before" "the refused run changed nothing"
 assert_file_absent "$bc/.dotfiles-backup"
 assert_file_absent "$bc/.config/dotfiles"
+# Without a flag the same host carries brew instead of refusing: install.sh needs curl, and only brew has it.
+bc3="$fx/bc3"
+V_BIG=0 V_BREW=1 make_old_home "$bc3"
+make_fake_brew "$bc3" curl
+before3="$(tree_hash "$bc3")"
+rc=0
+out="$(PATH="$lim:$bc3/brew/.linuxbrew/bin" run_brew "$bc3" --dry-run)" || rc=$?
+assert_eq "$rc" 0 "curl only in brew, no flag: carried, not refused: $out"
+assert_ok "the report says why brew is kept" -- grep -qF "install.sh needs curl, which only brew has" <<<"$out"
+assert_ok "and the block is planned" -- grep -qF "would add linuxbrew on PATH" <<<"$out"
+assert_fail "and install.sh keeps its PATH" -- grep -qF "taken off its PATH" <<<"$out"
+assert_eq "$(tree_hash "$bc3")" "$before3" "the dry run changed nothing"
 # Control: curl missing everywhere is not blamed on the drop.
 bc2="$fx/bc2"
 V_BIG=0 V_BREW=1 make_old_home "$bc2"

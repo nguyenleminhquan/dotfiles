@@ -225,7 +225,7 @@ _df_doctor_check_path() {
   # /etc/profile, which hides it from this login probe; the file is looked at too.
   env_file="${DF_ETC_ENVIRONMENT_FILE:-/etc/environment}"
   etc_has=0
-  if grep -qsF -e linuxbrew -e "$prefix" "$env_file"; then etc_has=1; fi
+  if grep -sv '^[[:space:]]*#' "$env_file" | grep -qF -e linuxbrew -e "$prefix"; then etc_has=1; fi
   if [ "$brew" -lt 0 ]; then
     if [ "$etc_has" = 1 ]; then
       _df_doc_warn "PATH: linuxbrew ($prefix) is on the PATH of ssh and console logins through /etc/environment (pam_env), which this install cannot undo (as root, remove it there)"

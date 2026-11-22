@@ -2,7 +2,7 @@
 # One-off migration from the old dotfiles (a clone of nobitagamer/dotfiles in
 # ~/.dotfiles) to this repo. Spec section 6.8.
 #
-#   tools/migrate-from-nobitagamer.sh [--profile minimal|server|workstation] [--drop-linuxbrew] [--dry-run]
+#   tools/migrate-from-nobitagamer.sh [--profile minimal|server|workstation] [--keep-linuxbrew|--drop-linuxbrew] [--dry-run]
 #
 # The profile defaults to workstation under WSL (the rule install.sh uses); on
 # any other host --profile is mandatory and a missing one is refused before
@@ -27,9 +27,11 @@
 #      directory holds keys. Both are appended once and undone by restore.sh
 #      Linuxbrew: when the old shells load it and commands exist only there (the
 #      login shell, the doctor's packages, zsh, micro, nano; not what the profile
-#      installs), a marked block in the same env.local appends it to PATH, last, so
-#      that they stay reachable. --drop-linuxbrew writes no block and the report
-#      lists what disappears instead. Linuxbrew itself is never touched.
+#      installs; or something install.sh needs), a marked block in the same env.local
+#      appends it to PATH, last, so that they stay reachable. --keep-linuxbrew writes
+#      the block whatever the list says; --drop-linuxbrew writes none. Whenever brew
+#      is not kept the report counts and names every command that exists only in it
+#      (not just the list above). Linuxbrew itself is never touched.
 #   7. prints what the old shells read that the new ones do not (sourced files,
 #      relocated variables such as GNUPGHOME or ZDOTDIR); informational only
 #   8. prints the old mise config against the new one (workstation: config.workstation.toml,
@@ -53,11 +55,14 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-usage: migrate-from-nobitagamer.sh [--profile minimal|server|workstation] [--drop-linuxbrew] [--dry-run]
+usage: migrate-from-nobitagamer.sh [--profile minimal|server|workstation] [--keep-linuxbrew|--drop-linuxbrew] [--dry-run]
 
   --profile P       profile to install; default workstation under WSL, mandatory elsewhere
-  --drop-linuxbrew  do not keep linuxbrew on PATH (default: kept, appended last, when a command
-                    exists only there); those commands then disappear, the report lists them
+  --keep-linuxbrew  always keep linuxbrew on PATH (the marked block, appended last), whatever
+                    the migration thinks depends on it
+  --drop-linuxbrew  never keep it: the commands that exist only there disappear, the report
+                    lists them (default: kept when a command the migration knows about
+                    exists only there, or install.sh needs one)
   --dry-run         print what would happen and write nothing
 EOF
 }
@@ -65,6 +70,7 @@ EOF
 dry_run=0
 profile=""
 drop_brew=0
+keep_brew=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run)
@@ -73,6 +79,10 @@ while [ $# -gt 0 ]; do
       ;;
     --drop-linuxbrew)
       drop_brew=1
+      shift
+      ;;
+    --keep-linuxbrew)
+      keep_brew=1
       shift
       ;;
     --profile)
@@ -104,6 +114,12 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+if [ "$keep_brew" = 1 ] && [ "$drop_brew" = 1 ]; then
+  usage
+  printf '[error] --keep-linuxbrew and --drop-linuxbrew exclude each other
+' >&2
+  exit 1
+fi
 case "$profile" in
   "" | minimal | server | workstation) ;;
   *)
@@ -557,6 +573,8 @@ mask_userinfo() {
     rest="${rest#*"$m"}"
   done
   MASKED="$out$rest"
+  # A value read from the user's files must not drive the terminal: show an escape byte as ^[.
+  MASKED="${MASKED//$'\e'/^[}"
 }
 
 # looks_secret <text>: the history rules (the one definition), after removing the
@@ -802,6 +820,7 @@ LOCAL_JOIN=()
 BREW_USED=0
 BREW_PREFIX=""
 BREW_STRIP=0
+BREW_ONLY_COUNT=0
 # What the user is told about what the old shells read: "<thing>|<fate>".
 LOCAL_NOTES=()
 declare -A VAR_SEEN=() VAR_VAL=() READ_SEEN=()
@@ -1016,14 +1035,16 @@ tool_on_path() {
   return 1
 }
 
-# check_strip_prereqs: install.sh dies on a missing prerequisite (curl and tar for the tool
-# downloads of server and workstation, git or curl+tar to fetch the code when DOTFILES_REPO is set),
-# and it runs without brew on its PATH when nothing keeps brew. A prerequisite that only brew has
-# would make it die AFTER the links and files were moved, so refuse now, in the plan, before
-# anything is written. A tool that is missing everywhere is not this check's business.
-check_strip_prereqs() {
+# brew_only_prereqs: BREW_PREREQ = what install.sh needs that only brew has. install.sh dies on a
+# missing prerequisite (curl and tar for the tool downloads of server and workstation, git or
+# curl+tar to fetch the code when DOTFILES_REPO is set) and runs without brew on its PATH when brew
+# is not kept; a prerequisite that only brew provides would make it die AFTER the links and files
+# were moved. A tool that is missing everywhere is not this check's business.
+BREW_PREREQ=()
+brew_only_prereqs() {
   local clean tool
   local -a need=() miss=()
+  BREW_PREREQ=()
   clean="$(path_without "$BREW_PREFIX")"
   case "$profile" in
     server | workstation) need+=(curl tar) ;;
@@ -1034,25 +1055,65 @@ check_strip_prereqs() {
     if ! tool_on_path "$tool" "$clean"; then miss+=("$tool"); fi
   done
   for tool in ${miss[@]+"${miss[@]}"}; do
-    if [ -x "$BREW_PREFIX/bin/$tool" ] || [ -x "$BREW_PREFIX/sbin/$tool" ]; then
-      die "$tool exists only in linuxbrew ($BREW_PREFIX), and install.sh runs without brew on its PATH here (nothing keeps brew): install $tool from the system packages, or run again without --drop-linuxbrew"
-    fi
+    if [ -x "$BREW_PREFIX/bin/$tool" ] || [ -x "$BREW_PREFIX/sbin/$tool" ]; then BREW_PREREQ+=("$tool"); fi
   done
 }
 
+# brew_only_commands <prefix>: every command in the brew bin directory (brew itself included) that is
+# not on the clean system PATH and that the profile does not provide (its mise tools; zsh through
+# zsh-bin on server and workstation, which install.sh installs once brew is off its PATH), sorted, one
+# per line. This is what disappears from a new terminal when brew is not kept; the candidate list of
+# plan_linuxbrew is only the part of it that decides on its own whether brew is kept.
+brew_only_commands() {
+  local prefix="$1" f cmd d found p
+  local -a provided=() names=()
+  mapfile -t provided < <(_df_doctor_tools "$profile" || true)
+  for f in "$prefix"/bin/*; do
+    cmd="${f##*/}"
+    if [ ! -x "$f" ] || [ -d "$f" ]; then continue; fi
+    found=0
+    for d in /usr/local/bin /usr/bin /bin; do
+      if [ -x "$d/$cmd" ]; then found=1; fi
+    done
+    for p in ${provided[@]+"${provided[@]}"}; do
+      if [ "$p" = "$cmd" ]; then found=1; fi
+    done
+    if [ "$cmd" = zsh ] && [ "$profile" != minimal ]; then found=1; fi
+    if [ "$found" = 0 ]; then names+=("$cmd"); fi
+  done
+  if [ "${#names[@]}" -gt 0 ]; then printf '%s\n' "${names[@]}" | LC_ALL=C sort -u; fi
+}
+
+# count_commands <n>: "1 command" or "N commands".
+count_commands() {
+  if [ "$1" = 1 ]; then printf '1 command'; else printf '%s commands' "$1"; fi
+}
+
+# name_list <names...>: the first 15 names, then "(+N more)".
+name_list() {
+  local n="$#" shown=15 out
+  local -a head=("${@:1:shown}")
+  out="$(join_commas "${head[@]}")"
+  if [ "$n" -gt "$shown" ]; then out+=" (+$((n - shown)) more)"; fi
+  printf '%s' "$out"
+}
+
 # plan_linuxbrew: the old shells load linuxbrew (brew shellenv, or a PATH assignment naming it) and
-# its bin exists. What would vanish without it: commands in brew's bin that are not on a clean system
-# PATH (the one a fresh ssh or cron session starts with) and that the profile does not provide: the
-# login shell when it lives under the prefix, the doctor's packages, zsh, micro and nano. The profile
-# provides the commands of its mise tools (config/mise/commands.*) and, for server and workstation,
-# zsh through zsh-bin. install.sh only installs zsh-bin when it finds no zsh, so it runs without
-# brew on its PATH whenever nothing keeps brew (BREW_STRIP); when brew is kept, zsh stays brew's and
-# is listed.
-# Default: add the marked block to env.local (same rules as the GNUPGHOME block). --drop-linuxbrew: no
-# block, the report names what disappears.
+# its bin exists. What would vanish without it: commands in the brew bin directory that are not on a
+# clean system PATH (the one a fresh ssh or cron session starts with) and that the profile does not
+# provide. The candidates that decide on their own whether brew is kept: the login shell when it
+# lives under the prefix, the doctor's packages, zsh, micro and nano, plus the prerequisites of
+# install.sh that only brew has. The profile provides the commands of its mise tools
+# (config/mise/commands.*) and, for server and workstation, zsh through zsh-bin. install.sh only
+# installs zsh-bin when it finds no zsh, so it runs without brew on its PATH whenever brew is not kept
+# (BREW_STRIP), unless env.local holds the block already; when brew is kept, zsh stays brew's and is
+# listed.
+# Default: add the marked block to env.local (same rules as the GNUPGHOME block) when a candidate
+# depends on brew. --keep-linuxbrew: always. --drop-linuxbrew: never; the report names everything
+# that disappears.
 plan_linuxbrew() {
-  local prefix login base="" cmd label d p found note where
-  local -a cand=() provided=() full=() rest=()
+  local prefix login base="" cmd label d p found note where marker=0 carry=0 why="" only
+  local -a cand=() provided=() full=() rest=() all=()
   local -A seen=()
   [ "$BREW_USED" = 1 ] || return 0
   prefix="$(df_linuxbrew_prefix)"
@@ -1082,27 +1143,61 @@ plan_linuxbrew() {
     if [ "$cmd" = zsh ] && [ "$profile" != minimal ]; then continue; fi
     rest+=("$label")
   done
+  mapfile -t all < <(brew_only_commands "$prefix")
+  brew_only_prereqs
+  if grep -qxF -- "$DF_LINUXBREW_BEGIN" "$HOME/.config/dotfiles/env.local" 2>/dev/null; then marker=1; fi
 
-  if [ "$drop_brew" = 1 ]; then
-    BREW_STRIP=1
-    if [ "${#rest[@]}" = 0 ]; then
-      note="dropped (--drop-linuxbrew) — nothing depends on it"
-    else
-      note="dropped (--drop-linuxbrew) — these commands will disappear: $(join_commas "${rest[@]}"); install them with the system package manager, or run again without --drop-linuxbrew"
-    fi
-    if grep -qxF -- "$DF_LINUXBREW_BEGIN" "$HOME/.config/dotfiles/env.local" 2>/dev/null; then
-      note+="; the block already in ~/.config/dotfiles/env.local is left as it is"
-    fi
-  elif [ "${#rest[@]}" = 0 ]; then
-    BREW_STRIP=1
-    note="nothing depends on it (what it has is on the system or comes with the profile), so it is not kept on PATH"
-  else
+  # What decides: the flags first, then the block that is there already, then what depends on brew.
+  if [ "$keep_brew" = 1 ]; then
+    carry=1
+  elif [ "$drop_brew" = 1 ]; then
+    carry=0
+  elif [ "$marker" = 1 ] || [ "${#rest[@]}" -gt 0 ]; then
+    carry=1
+  elif [ "${#BREW_PREREQ[@]}" -gt 0 ]; then
+    carry=1
+    why="install.sh needs $(join_commas "${BREW_PREREQ[@]}"), which only brew has"
+  fi
+
+  if [ "$carry" = 1 ]; then
     add_local_target .config/dotfiles/env.local "$DF_LINUXBREW_BEGIN" "$(linuxbrew_body "$prefix")" "linuxbrew on PATH" "$DF_LINUXBREW_END"
     where="appended last"
     if [ "${LOCAL_KIND[$((${#LOCAL_KIND[@]} - 1))]}" = present ]; then where="the block is already in env.local"; fi
-    note="kept on PATH ($where) — only there: $(join_commas "${full[@]}")"
+    if [ "${#full[@]}" -gt 0 ]; then
+      only="only there: $(join_commas "${full[@]}")"
+    elif [ "${#all[@]}" -gt 0 ]; then
+      only="only there: $(count_commands "${#all[@]}"): $(name_list "${all[@]}")"
+    else
+      only="nothing else depends on it"
+    fi
+    note="kept on PATH ($where) — $only"
+    if [ -n "$why" ]; then note+="; $why"; fi
+  else
+    # Brew is off install.sh's PATH, as it is off a new terminal's, unless env.local keeps it there.
+    if [ "$marker" = 0 ]; then BREW_STRIP=1; fi
+    BREW_ONLY_COUNT="${#all[@]}"
+    if [ "$drop_brew" = 1 ] && [ "$marker" = 0 ] && [ "${#BREW_PREREQ[@]}" -gt 0 ]; then
+      die "${BREW_PREREQ[0]} exists only in linuxbrew ($BREW_PREFIX), and install.sh runs without brew on its PATH with --drop-linuxbrew: install ${BREW_PREREQ[0]} from the system packages, or run again without --drop-linuxbrew"
+    fi
+    if [ "$marker" = 1 ]; then
+      note="dropped (--drop-linuxbrew): the block already in ~/.config/dotfiles/env.local is left as it is and keeps brew on PATH"
+    elif [ "${#all[@]}" -gt 0 ]; then
+      if [ "$drop_brew" = 1 ]; then note="dropped (--drop-linuxbrew)"; else note="not kept on PATH"; fi
+      note+=" — $(count_commands "${#all[@]}") will disappear: $(name_list "${all[@]}")"
+      case "$login" in
+        "$prefix"/*) note+="; login shell stays $login by absolute path" ;;
+      esac
+      if [ "$drop_brew" = 1 ]; then
+        note+="; install them with the system package manager, or use --keep-linuxbrew to keep them on PATH"
+      else
+        note+="; use --keep-linuxbrew to keep them on PATH"
+      fi
+    elif [ "$drop_brew" = 1 ]; then
+      note="dropped (--drop-linuxbrew) — nothing depends on it"
+    else
+      note="nothing depends on it (what it has is on the system or comes with the profile), so it is not kept on PATH"
+    fi
   fi
-  if [ "$BREW_STRIP" = 1 ]; then check_strip_prereqs; fi
   LOCAL_NOTES+=("linuxbrew|$note")
 }
 
@@ -1194,7 +1289,13 @@ report_plan() {
     esac
   done
   strip_note=""
-  if [ "$BREW_STRIP" = 1 ]; then strip_note=" (linuxbrew taken off its PATH: nothing keeps it)"; fi
+  if [ "$BREW_STRIP" = 1 ]; then
+    if [ "$BREW_ONLY_COUNT" -gt 0 ]; then
+      strip_note=" (linuxbrew taken off its PATH: $(count_commands "$BREW_ONLY_COUNT") will disappear, use --keep-linuxbrew to keep them)"
+    else
+      strip_note=" (linuxbrew taken off its PATH: nothing depends on it)"
+    fi
+  fi
   if [ -n "${DOTFILES_REPO:-}" ]; then
     log_info "install: $verb run: DOTFILES_REPO=$DOTFILES_REPO bash $self_root/install.sh --profile $profile$strip_note"
   else
