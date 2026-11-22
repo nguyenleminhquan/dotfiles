@@ -251,6 +251,10 @@ for entry in "${tool_cmds[@]}"; do
   assert_ok "$cmd runs" -- bash -lc "$cmd"
 done
 assert_eq "$(grep -Ec '^"(aqua|github):' "$cfg")" "${#tool_cmds[@]}" "this test covers every tool in the config"
+# helm stays on 3.x on purpose (the charts, plugins and GitOps repos in use are
+# helm 3): moving to 4 has to be a decision, not a side effect of a bump.
+assert_ok "config pins helm to 3.x" -- grep -Eq '^"aqua:helm/helm" = "3\.[0-9.]+"$' "$cfg"
+assert_ok "helm reports a v3 release" -- bash -lc 'helm version --short | grep -Eq "^v3\."'
 assert_eq "$(wc -l <"$HOME/.config/dotfiles/mise-installs" | tr -d ' ')" "${#tool_cmds[@]}" "every install is recorded"
 # Our mise config is a conf.d fragment; config.toml stays the user's (mise writes there).
 assert_symlink "$HOME/.config/mise/conf.d/dotfiles.toml" "$HOME/.dotfiles/config/mise/config.toml"
