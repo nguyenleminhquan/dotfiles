@@ -15,6 +15,14 @@
 # DF_ETC_ENVIRONMENT_FILE (like DF_LINUXBREW_PREFIX and DF_LOGIN_SHELL, see
 # lib/detect.sh) replaces /etc/environment and exists for tests only.
 
+# The most an interactive zsh may take to start before the doctor warns, in ms.
+# WSL1 starts processes slowly, which is what the budget is mostly about.
+# DF_DOCTOR_ZSH_BUDGET_MS overrides it and exists for tests only.
+DF_ZSH_STARTUP_BUDGET_MS="${DF_DOCTOR_ZSH_BUDGET_MS:-600}"
+case "$DF_ZSH_STARTUP_BUDGET_MS" in
+  '' | *[!0-9]*) DF_ZSH_STARTUP_BUDGET_MS=600 ;;
+esac
+
 _df_doctor_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # One definition of df_ping_group_ok: the one the shell helpers use.
 # shellcheck source=shell/netdebug.sh
@@ -285,12 +293,13 @@ _df_doctor_check_ping() {
   fi
 }
 
-# _df_doctor_check_zsh <profile>: median of three `zsh -i -c exit` runs, as
-# information. The profiles with tools expect a zsh; minimal makes do without.
+# _df_doctor_check_zsh <profile>: median of three `zsh -i -c exit` runs; over
+# DF_ZSH_STARTUP_BUDGET_MS it is a WARN. The profiles with tools expect a zsh;
+# minimal makes do without.
 # The zsh is the one a fresh login session finds (a login shell run with the
 # environment cleared), not one that only this shell's PATH has.
 _df_doctor_check_zsh() {
-  local zsh i t0 t1 median
+  local zsh i t0 t1 median hint
   local -a ms=() limit=() sorted=()
   zsh="$(_df_doctor_clean -lc 'command -v zsh' | tail -n 1)" || zsh=""
   case "$zsh" in
@@ -317,7 +326,16 @@ _df_doctor_check_zsh() {
   done
   mapfile -t sorted < <(printf '%s\n' "${ms[@]}" | sort -n)
   median="${sorted[1]}"
-  _df_doc_ok "zsh startup: $median ms (median of 3)"
+  if [ "$median" -le "$DF_ZSH_STARTUP_BUDGET_MS" ]; then
+    _df_doc_ok "zsh startup: $median ms (median of 3)"
+    return 0
+  fi
+  hint=""
+  df_detect
+  if [ "$DF_WSL" = 1 ]; then
+    hint="; on WSL1 starting a process is slow, and the usual causes are mise activate and ~/.localrc (yours); WSL2 starts processes natively"
+  fi
+  _df_doc_warn "zsh startup: $median ms (median of 3), over the $DF_ZSH_STARTUP_BUDGET_MS ms budget$hint"
 }
 
 df_doctor() {

@@ -222,6 +222,35 @@ assert_eq "$(grep -c '^FAIL' <<<"$out" || true)" 0 "the block is no FAIL"
 stub "$brew/bin/zsh"
 out="$(DF_LINUXBREW_PREFIX="$brew" probe_doctor)"
 assert_ok "a zsh reached through the block is found" -- grep -Eq '^OK +zsh startup: ' <<<"$out"
+# The startup budget (600 ms, DF_DOCTOR_ZSH_BUDGET_MS lowers it for tests): over it is a WARN with a
+# hint, under it stays OK. The slow zsh is a stub that sleeps, put in front of the system's by
+# env.local (a zsh from the brew block would come after the system zsh of most rows). WSL1 is
+# pretended with a fixture.
+slowbin="$fx/slowbin"
+mkdir -p "$slowbin"
+printf 'PATH="%s:$PATH"\n' "$slowbin" >~/.config/dotfiles/env.local
+printf '#!/bin/sh\nsleep 0.7\n' >"$slowbin/zsh"
+chmod +x "$slowbin/zsh"
+out="$(probe_doctor)"
+assert_ok "a zsh slower than the default 600 ms budget is a WARN" -- grep -Eq '^WARN +zsh startup: [0-9]+ ms \(median of 3\), over the 600 ms budget' <<<"$out"
+assert_eq "$(grep -c '^FAIL' <<<"$out" || true)" 0 "and no FAIL"
+printf '#!/bin/sh\nsleep 0.4\n' >"$slowbin/zsh"
+out="$(DF_DOCTOR_ZSH_BUDGET_MS=2000 probe_doctor)"
+assert_ok "under a raised budget the same zsh is OK" -- grep -Eq '^OK +zsh startup: [0-9]+ ms \(median of 3\)$' <<<"$out"
+out="$(DF_DOCTOR_ZSH_BUDGET_MS=200 DF_PROC_VERSION_FILE=/nonexistent probe_doctor)"
+assert_ok "the budget can be lowered" -- grep -Eq '^WARN +zsh startup: [0-9]+ ms \(median of 3\), over the 200 ms budget' <<<"$out"
+assert_fail "natively there is no WSL hint" -- grep -Eq '^WARN +zsh startup.*(WSL|localrc)' <<<"$out"
+out="$(DF_DOCTOR_ZSH_BUDGET_MS=200 DF_PROC_VERSION_FILE=/src/test/fixtures/proc-version-wsl1 probe_doctor)"
+assert_ok "on WSL1 the WARN names mise activate and ~/.localrc" -- grep -Eq '^WARN +zsh startup: .*mise activate.*~/\.localrc' <<<"$out"
+assert_ok "and says that WSL2 starts processes natively" -- grep -Eq '^WARN +zsh startup: .*WSL2 starts processes natively' <<<"$out"
+printf 'Linux version 5.15.153.1-microsoft-standard-WSL2\n' >"$fx/proc-wsl2"
+out="$(DF_DOCTOR_ZSH_BUDGET_MS=200 DF_PROC_VERSION_FILE="$fx/proc-wsl2" probe_doctor)"
+assert_fail "on WSL2 there is no WSL hint" -- grep -Eq '^WARN +zsh startup.*(WSL|localrc)' <<<"$out"
+printf '#!/bin/sh\nexit 0\n' >"$slowbin/zsh"
+out="$(DF_DOCTOR_ZSH_BUDGET_MS=200 DF_PROC_VERSION_FILE=/src/test/fixtures/proc-version-wsl1 probe_doctor)"
+assert_ok "a fast zsh is OK, on WSL1 too" -- grep -Eq '^OK +zsh startup: [0-9]+ ms \(median of 3\)$' <<<"$out"
+rm -rf "$slowbin"
+brew_block "$brew" >~/.config/dotfiles/env.local
 rm -f "$brew/bin/zsh"
 # Without the block the same package is missing, whatever the inherited PATH says.
 rm -f ~/.config/dotfiles/env.local
