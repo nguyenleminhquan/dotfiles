@@ -3,13 +3,17 @@
 # in a throwaway directory and runs the script with HOME pointing there, so the
 # real home is never touched. The install it ends with skips the tool downloads
 # (DOTFILES_NO_TOOLS): 50-server-tools.sh and 70-workstation.sh cover those.
-# Runs on the u20-ws row only; the other rows skip it.
+# Runs on the u20-ws row (everything) and on r9 (only the offline profile case,
+# profile_cases); the other rows skip it.
 # SC2016: the snippets are meant to be expanded by the shell under test.
 # SC2030/SC2031: HOME is changed in subshells on purpose.
 # SC2088: a "~" inside a test message is meant literally.
 # shellcheck disable=SC2016,SC2030,SC2031,SC2088
 
-[ "$DF_ROW" = u20-ws ] || return 0
+case "$DF_ROW" in
+  u20-ws | r9) ;;
+  *) return 0 ;;
+esac
 export DOTFILES_NO_TOOLS=1
 mig=/src/tools/migrate-from-nobitagamer.sh
 fx="$(mktemp -d)"
@@ -135,11 +139,39 @@ HIST
   cat "$fx/bulk1" "$fx/kept" "$fx/bulk2" >"$out"
 }
 
+# local_layer <home> <variant>: what the old setup keeps outside the repo (fake values).
+#   1  ~/.localrc sourced by the old zsh and bash, GNUPGHOME in the XDG location with a
+#      keyring, ~/.foo sourced too, HISTFILE set, a pre-existing ~/.zshrc.local
+#      without a final newline
+#   2  no ~/.localrc, GNUPGHOME points at a directory with no keys, ~/.foo sourced
+local_layer() {
+  local h="$1" o="$1/.dotfiles"
+  printf 'export GNUPGHOME="${XDG_CONFIG_HOME:-$HOME/.config}/gnupg"\n' >>"$o/shells/zsh/zshenv"
+  {
+    printf '[[ -a $HOME/.foo ]] && source "$HOME/.foo"\n'
+    printf 'source "$HOME/.config/zsh/aliases/git.zsh"\n'
+    printf 'HISTFILE=$HOME/.histfile-old\n'
+  } >>"$o/shells/zsh/zshrc"
+  printf 'export FOO_PROBE=from-foo\n' >"$h/.foo"
+  if [ "$2" = 1 ]; then
+    printf '[ -f ~/.localrc ] && source ~/.localrc\n' >>"$o/shells/zsh/zshrc"
+    printf '[ -f "$HOME/.localrc" ] && . "$HOME/.localrc"\n' >>"$o/shells/bash/bash_profile"
+    printf 'export LOCALRC_PROBE=from-localrc\nexport KUBECONFIG=$HOME/.kube/lab.example.yaml\nalias ll="ls -l"\n' >"$h/.localrc"
+    mkdir -p "$h/.config/gnupg/private-keys-v1.d"
+    printf 'fake key\n' >"$h/.config/gnupg/private-keys-v1.d/ABCD.key"
+    printf 'fake trustdb\n' >"$h/.config/gnupg/trustdb.gpg"
+    printf '# my zsh local\nalias zz=true' >"$h/.zshrc.local"
+  else
+    mkdir -p "$h/.config/gnupg/private-keys-v1.d"
+  fi
+}
+
 # make_old_home <home>: a fake machine with the old setup. Variants (environment):
 #   V_DOTS=0     no .dots file (the git origin alone identifies the old setup)
 #   V_REALGIT=1  ~/.gitconfig is a real file
 #   V_ZDOT=1     ZDOTDIR is ~/zdot instead of ~/.config/zsh
 #   V_BIG=0      a short history
+#   V_LOCAL=1|2  the old setup's local layer, see local_layer
 make_old_home() {
   local h="$1" o="$1/.dotfiles"
   : >"$h.expected-links"
@@ -256,6 +288,8 @@ EOF
     cat "$fx/short" "$fx/kept" >"$h.hist-expected"
   fi
 
+  if [ -n "${V_LOCAL:-}" ]; then local_layer "$h" "$V_LOCAL"; fi
+
   # Not ours and not into the old setup: must survive untouched, and find must
   # not descend into a symlinked directory (the link inside data points into
   # the old setup).
@@ -312,6 +346,65 @@ expect_refusal() {
 assert_ne() { [ "$1" != "$2" ] || _fail "$3"; }
 
 backup_of() { sed -n 's/^backup=//p' "$1/.config/dotfiles/migrated-from-nobitagamer"; }
+
+# --- the marked blocks the migration writes, and shells to look at them ---------------------------
+blk_begin_rc='# >>> migrated from nobitagamer/dotfiles: ~/.localrc >>>'
+blk_begin_gpg='# >>> migrated from nobitagamer/dotfiles: GNUPGHOME >>>'
+blk_end='# <<< migrated from nobitagamer/dotfiles <<<'
+shim_line='[ -r "$HOME/.localrc" ] && . "$HOME/.localrc"'
+# probe_bash_i <home> <command>: run it in an interactive bash (no tty, so it stays bash).
+probe_bash_i() { env -u DOTFILES_DIR HOME="$1" bash -i -c "$2" </dev/null 2>/dev/null; }
+# probe_zsh_i <home> <command>: run it in an interactive zsh on a pty.
+probe_zsh_i() { env -u DOTFILES_DIR HOME="$1" TERM=dumb script -qec "zsh -i -c '$2'" /dev/null </dev/null 2>/dev/null | tr -d '\r'; }
+
+# --- case_profile: --profile picks what is installed; a host that is not WSL has no default ----------
+# Needs no network (minimal installs no tools), so the r9 row runs it with the network off.
+profile_cases() {
+  local w="$fx/w" w_before out rc=0 rout bk_w
+  V_BIG=0 V_LOCAL=1 make_old_home "$w"
+  w_before="$(tree_hash "$w")"
+  if [ "$DF_ROW" != u20-ws ]; then
+    expect_refusal "$w" 'no default profile'
+    out="$(run_mig "$w" --dry-run)" && _fail "a dry run without --profile on a host that is not WSL should refuse"
+    assert_ok "the dry run says to pass --profile" -- grep -qF 'pass --profile' <<<"$out"
+  fi
+  out="$(run_mig "$w" --profile bogus)" && _fail "an unknown profile should be refused"
+  assert_ok "an unknown profile is named" -- grep -qF 'unknown profile: bogus' <<<"$out"
+  assert_eq "$(tree_hash "$w")" "$w_before" "refusals change nothing"
+
+  out="$(run_mig "$w" --dry-run --profile minimal)" || { printf '%s\n' "$out" >&2; _fail "dry run with --profile minimal failed"; }
+  assert_ok "the dry run installs the chosen profile" -- grep -qF 'install.sh --profile minimal' <<<"$out"
+  assert_ok "and says that minimal has nothing to compare the mise config with" -- grep -qF 'installs no tools' <<<"$out"
+  assert_eq "$(tree_hash "$w")" "$w_before" "a dry run with --profile writes nothing"
+
+  rc=0
+  out="$(run_mig "$w" --profile=minimal)" || rc=$?
+  if [ "$rc" -ne 0 ]; then printf '%s\n' "$out" >&2; _fail "migrate --profile minimal failed"; fi
+  bk_w="$(backup_of "$w")"
+  assert_eq "$(cat "$w/.config/dotfiles/profile")" minimal "the saved profile is minimal"
+  assert_symlink "$w/.zshenv" "$w/.dotfiles/shell/zshenv"
+  assert_ok "~/.dotfiles is the new one" -- test -f "$w/.dotfiles/.dotfiles-managed"
+  assert_ok "the links into the old setup are gone" -- test ! -L "$w/.config/zsh/.zshrc"
+  assert_file_absent "$w/.config/mise/conf.d/dotfiles.toml"
+  assert_ok "the mise config is kept in the backup" -- grep -qF 'node = "20"' "$bk_w/.config/mise/config.toml"
+  assert_eq "$(sed -n '/^# >>> migrated/,$p' "$w/.bashrc.local")" "$(printf '%s\n%s\n%s' "$blk_begin_rc" "$shim_line" "$blk_end")" "the ~/.localrc shim is in ~/.bashrc.local"
+  assert_ok "and in ~/.zshrc.local" -- grep -qxF "$shim_line" "$w/.zshrc.local"
+  assert_eq "$(probe_bash_i "$w" 'echo "P:$LOCALRC_PROBE:E"' | grep -o 'P:[^:]*:E')" "P:from-localrc:E" "interactive bash reads ~/.localrc under minimal"
+  assert_eq "$(env HOME="$w" bash -c '. ~/.bashrc; echo "G:$GNUPGHOME"')" "G:$w/.config/gnupg" "an ssh-like shell sees GNUPGHOME under minimal"
+  assert_eq "$(env HOME="$w" bash -c '. ~/.bashrc; echo ok' 2>&1)" ok "non-interactive bash prints nothing under minimal"
+
+  (cd / && HOME="$w" bash "$w/.local/bin/dotfiles" uninstall >/dev/null 2>&1) || _fail "dotfiles uninstall failed (profile minimal)"
+  rout="$(cd / && HOME="$w" bash "$bk_w/restore.sh" 2>&1)" || { printf '%s\n' "$rout" >&2; _fail "restore.sh failed (profile minimal)"; }
+  assert_eq "$(tree_hash "$w")" "$w_before" "restore.sh brings back the exact state (profile minimal)"
+}
+
+# The r9 row is not WSL: it only runs the profile case, offline (minimal installs nothing).
+if [ "$DF_ROW" = r9 ]; then
+  if [ "$DF_PROFILE" = minimal ]; then profile_cases; fi
+  rm -rf "$fx"
+  return 0
+fi
+
 
 # --- case_dry_run: prints everything, writes nothing --------------------------------------
 a="$fx/a"
@@ -646,6 +739,106 @@ assert_eq "$(tree_hash "$p")" "$p_mid" "a refused restore.sh changes nothing"
 rm "$p/.config/dotfiles/links" # what uninstall.sh does with it
 rout="$(cd / && HOME="$p" bash "$bk_p/restore.sh" 2>&1)" || { printf '%s\n' "$rout" >&2; _fail "restore.sh failed after the manifest was removed"; }
 assert_eq "$(tree_hash "$p")" "$p_before" "then restore.sh brings back the exact state"
+
+# --- case_local_layer: ~/.localrc and GNUPGHOME survive, what is not carried is reported -------
+l="$fx/l"
+V_BIG=0 V_LOCAL=1 make_old_home "$l"
+l_before="$(tree_hash "$l")"
+l_list="$(tree_list "$l")"
+localrc_sha="$(sha256sum <"$l/.localrc")"
+cp "$l/.zshrc.local" "$fx/zshrc.local.orig"
+dry="$(run_mig "$l" --dry-run)" || { printf '%s\n' "$dry" >&2; _fail "dry run with a local layer failed"; }
+assert_eq "$(tree_hash "$l")" "$l_before" "local layer: the dry run writes nothing"
+assert_eq "$(tree_list "$l")" "$l_list" "local layer: the dry run creates nothing"
+for want in "would add the ~/.localrc shim to ~/.zshrc.local (existing file, backed up)" \
+  "would add the ~/.localrc shim to ~/.bashrc.local (new file)" \
+  'would add GNUPGHOME="$HOME/.config/gnupg" to ~/.config/dotfiles/env.local (new file)' \
+  "~/.localrc: kept (shim in ~/.zshrc.local, ~/.bashrc.local)" "~/.foo: no longer read" \
+  "GNUPGHOME: carried to env.local" "ZDOTDIR: history migrated to ~/.zsh_history" "HISTFILE: no longer read"; do
+  assert_ok "local layer dry run says: $want" -- grep -qF -- "$want" <<<"$dry"
+done
+assert_fail "a file that links into the old dotfiles is not reported" -- grep -qF 'git.zsh: ' <<<"$dry"
+
+rc=0
+out="$(run_mig "$l")" || rc=$?
+if [ "$rc" -ne 0 ]; then printf '%s\n' "$out" >&2; _fail "migrate with a local layer failed"; fi
+bk_l="$(backup_of "$l")"
+assert_ok "the run says what stops being read" -- grep -qF "~/.foo: no longer read" <<<"$out"
+assert_ok "and hints at the shim" -- grep -qF 'kept through a shim' <<<"$out"
+assert_eq "$(sha256sum <"$l/.localrc")" "$localrc_sha" "~/.localrc is not modified"
+assert_eq "$(cat "$l/.bashrc.local")" "$(printf '%s\n%s\n%s' "$blk_begin_rc" "$shim_line" "$blk_end")" \
+  "a new ~/.bashrc.local holds exactly the shim"
+assert_eq "$(cat "$l/.zshrc.local")" "$(
+  cat "$fx/zshrc.local.orig"
+  printf '\n%s\n%s\n%s' "$blk_begin_rc" "$shim_line" "$blk_end"
+)" "the existing ~/.zshrc.local keeps its content and gets the shim after it"
+assert_eq "$(cat "$l/.config/dotfiles/env.local")" "$(printf '%s\n%s\n%s' "$blk_begin_gpg" 'export GNUPGHOME="$HOME/.config/gnupg"' "$blk_end")" \
+  'env.local exports GNUPGHOME written with $HOME'
+assert_eq "$(stat -c %a "$l/.bashrc.local")" 644 "the new rc file is world-readable like the others"
+assert_ok "the existing ~/.zshrc.local is in the backup" -- cmp -s "$bk_l/.zshrc.local" "$fx/zshrc.local.orig"
+# Behaviour: interactive shells read ~/.localrc, every shell gets GNUPGHOME, no shell prints anything.
+assert_eq "$(probe_bash_i "$l" 'echo "P:$LOCALRC_PROBE:E"' | grep -o 'P:[^:]*:E')" "P:from-localrc:E" "interactive bash reads ~/.localrc"
+assert_eq "$(probe_zsh_i "$l" 'echo "P:$LOCALRC_PROBE:E"' | grep -o 'P:[^:]*:E')" "P:from-localrc:E" "interactive zsh reads ~/.localrc"
+assert_eq "$(env HOME="$l" bash -c '. ~/.bashrc; echo "G:$GNUPGHOME"')" "G:$l/.config/gnupg" "an ssh-like shell sees GNUPGHOME"
+assert_eq "$(env HOME="$l" zsh -c 'echo "G:$GNUPGHOME"')" "G:$l/.config/gnupg" "a non-interactive zsh sees GNUPGHOME"
+assert_eq "$(env HOME="$l" bash -c '. ~/.bashrc; echo "${LOCALRC_PROBE:-unset}"')" unset "~/.localrc is not read by a non-interactive shell (as before)"
+assert_eq "$(env HOME="$l" bash -c '. ~/.bashrc; echo ok' 2>&1)" ok "non-interactive bash prints nothing"
+assert_eq "$(env HOME="$l" bash -lc 'echo ok' 2>&1)" ok "login bash prints nothing"
+assert_eq "$(env HOME="$l" zsh -c 'echo ok' 2>&1)" ok "non-interactive zsh prints nothing"
+
+# Rolling back: the files the migration created go, the existing one is as it was.
+(cd / && HOME="$l" bash "$l/.local/bin/dotfiles" uninstall >/dev/null 2>&1) || _fail "dotfiles uninstall failed (local layer)"
+rout="$(cd / && HOME="$l" bash "$bk_l/restore.sh" 2>&1)" || { printf '%s\n' "$rout" >&2; _fail "restore.sh failed (local layer)"; }
+assert_eq "$(tree_hash "$l")" "$l_before" "local layer: restore.sh brings back the exact state, ~/.zshrc.local byte for byte"
+assert_file_absent "$l/.bashrc.local"
+assert_file_absent "$l/.config/dotfiles/env.local"
+
+# A file that was edited after the migration is kept, with a warning; so is an edited block.
+l2="$fx/l2"
+V_BIG=0 V_LOCAL=1 make_old_home "$l2"
+out="$(run_mig "$l2")" || { printf '%s\n' "$out" >&2; _fail "migrate failed (edited local files)"; }
+bk_l2="$(backup_of "$l2")"
+printf 'alias mine=true\n' >>"$l2/.bashrc.local"
+sed -i 's|^\[ -r "\$HOME/.localrc" \] .*|& # edited|' "$l2/.zshrc.local"
+(cd / && HOME="$l2" bash "$l2/.local/bin/dotfiles" uninstall >/dev/null 2>&1) || _fail "dotfiles uninstall failed (edited local files)"
+rout="$(cd / && HOME="$l2" bash "$bk_l2/restore.sh" 2>&1)" || { printf '%s\n' "$rout" >&2; _fail "restore.sh failed (edited local files)"; }
+assert_ok "an edited created file is kept" -- grep -qF 'alias mine=true' "$l2/.bashrc.local"
+assert_ok "and restore.sh says so" -- grep -qF "$l2/.bashrc.local changed since the migration" <<<"$rout"
+assert_ok "an edited block is kept" -- grep -qF '# edited' "$l2/.zshrc.local"
+assert_ok "and restore.sh says so too" -- grep -qF "$l2/.zshrc.local: the migration block was edited" <<<"$rout"
+assert_file_absent "$l2/.config/dotfiles/env.local"
+
+# Idempotence: a file that already has the block does not get a second one, and is not touched on rollback.
+l3="$fx/l3"
+V_BIG=0 V_LOCAL=1 make_old_home "$l3"
+printf '# mine\n%s\n%s\n%s\n' "$blk_begin_rc" "$shim_line" "$blk_end" >"$l3/.zshrc.local"
+l3_before="$(tree_hash "$l3")"
+out="$(run_mig "$l3")" || { printf '%s\n' "$out" >&2; _fail "migrate failed (block already there)"; }
+bk_l3="$(backup_of "$l3")"
+assert_eq "$(grep -cF "$blk_begin_rc" "$l3/.zshrc.local")" 1 "no second block in a file that has one"
+assert_ok "the run says the block is there already" -- grep -qF "~/.zshrc.local already has the ~/.localrc shim" <<<"$out"
+(cd / && HOME="$l3" bash "$l3/.local/bin/dotfiles" uninstall >/dev/null 2>&1) || _fail "dotfiles uninstall failed (block already there)"
+rout="$(cd / && HOME="$l3" bash "$bk_l3/restore.sh" 2>&1)" || { printf '%s\n' "$rout" >&2; _fail "restore.sh failed (block already there)"; }
+assert_eq "$(tree_hash "$l3")" "$l3_before" "restore.sh leaves the block that was there before"
+
+# Nothing to carry: no ~/.localrc, a GNUPGHOME directory without keys.
+m="$fx/m"
+V_BIG=0 V_LOCAL=2 make_old_home "$m"
+m_before="$(tree_hash "$m")"
+out="$(run_mig "$m")" || { printf '%s\n' "$out" >&2; _fail "migrate failed (nothing to carry)"; }
+bk_m="$(backup_of "$m")"
+assert_file_absent "$m/.zshrc.local"
+assert_file_absent "$m/.bashrc.local"
+assert_file_absent "$m/.config/dotfiles/env.local"
+assert_ok "GNUPGHOME without keys is reported as no longer read" -- grep -qF "GNUPGHOME: no longer read" <<<"$out"
+assert_ok "so is a file the old shells sourced" -- grep -qF "~/.foo: no longer read" <<<"$out"
+assert_fail "no shim is announced" -- grep -qF 'kept through a shim' <<<"$out"
+assert_eq "$(env HOME="$m" bash -c '. ~/.bashrc; echo "${GNUPGHOME:-unset}"')" unset "GNUPGHOME is not set from an empty directory"
+(cd / && HOME="$m" bash "$m/.local/bin/dotfiles" uninstall >/dev/null 2>&1) || _fail "dotfiles uninstall failed (nothing to carry)"
+rout="$(cd / && HOME="$m" bash "$bk_m/restore.sh" 2>&1)" || { printf '%s\n' "$rout" >&2; _fail "restore.sh failed (nothing to carry)"; }
+assert_eq "$(tree_hash "$m")" "$m_before" "restored byte for byte (nothing to carry)"
+
+profile_cases
 
 # The real home was never touched.
 assert_file_absent "$HOME/.dotfiles-backup"

@@ -72,10 +72,9 @@ dotfiles uninstall --purge --force  # ... even if the checkout holds unsaved wor
   changes nothing; commit and push, or add `--force` to delete anyway. Backups
   in `~/.dotfiles-backup/` are always kept, and so is `~/python-env` (the
   workstation's Python environment): purge never removes either.
-- Local settings live in files the repo never touches: `~/.bashrc.local`,
-  `~/.zshrc.local`, `~/.gitconfig.local` (identity, signing key, credential
-  helper) and `~/.config/dotfiles/env.local` (read by every shell, so it must
-  never print anything; a `GITHUB_TOKEN` for the installer can go there).
+- Local settings live in files the repo never touches (see
+  [Local layer](#local-layer)): `~/.bashrc.local`, `~/.zshrc.local`,
+  `~/.gitconfig.local` and `~/.config/dotfiles/env.local`.
 - `~/.config/git/config` is generated and includes the repo's git settings, so
   `git config --global` writes into your file, not into the repo.
   `~/.config/micro/settings.json` is copied once and is yours from then on.
@@ -90,17 +89,38 @@ dotfiles uninstall --purge --force  # ... even if the checkout holds unsaved wor
 - Non-interactive shells never print anything and never switch to zsh; they see
   `~/.local/bin` and the mise shims only at the end of `PATH`.
 
+## Local layer
+
+Anything that depends on the machine or holds a secret goes into these files.
+They are never committed, and install, update and uninstall never overwrite them.
+
+| File | Read by | Put here |
+| --- | --- | --- |
+| `~/.config/dotfiles/env.local` | every shell, including `ssh host cmd`, cron and scripts, so it must never print anything | environment for all of them: `GNUPGHOME`, a `GITHUB_TOKEN` for the installer, proxies, `SSL_CERT_FILE` |
+| `~/.zshrc.local`, `~/.bashrc.local` | interactive shells only | aliases, completions, key bindings, agents (`eval "$(gpg-agent ...)"`) |
+| `~/.gitconfig.local` | git | identity, signing key, credential helper, `safe.directory` |
+
+Two rules of thumb. Per-project environment (`KUBECONFIG`, `HELMFILE_ENVIRONMENT`,
+...) belongs in the project's `mise.toml` under `[env]`, not in a home-wide rc
+file. Tokens do not belong in rc files at all: prefer the tool's own login
+(for example `argocd login --sso`).
+
 ## Migration from the old setup
 
 `tools/migrate-from-nobitagamer.sh` moves a machine from the old
-`nobitagamer/dotfiles` setup to the `workstation` profile, once. It recognises
-the old checkout by its git origin or its `.dots` file and refuses anything
-else.
+`nobitagamer/dotfiles` setup to this one, once. It recognises the old checkout
+by its git origin or its `.dots` file and refuses anything else. `--profile
+minimal|server|workstation` picks what gets installed; it defaults to
+`workstation` under WSL and is mandatory on any other host (a server must not
+get the workstation tools), and a missing one is refused before anything is
+changed.
 
 1. Dry run first. It writes nothing and prints the plan: what is backed up, the
    symlinks that point into the old checkout, how much of the zsh history would
    be kept (commands that look like secrets are dropped), which git settings
-   move to `~/.gitconfig.local`, and the old mise config against the new one.
+   move to `~/.gitconfig.local`, what happens to the old local layer (below),
+   and the old mise config against the new one (`workstation` and `server`
+   only: `minimal` installs no tools).
 
    ```sh
    tools/migrate-from-nobitagamer.sh --dry-run
@@ -110,7 +130,8 @@ else.
    real from a checkout of this repository:
 
    ```sh
-   tools/migrate-from-nobitagamer.sh
+   tools/migrate-from-nobitagamer.sh                   # WSL: workstation
+   tools/migrate-from-nobitagamer.sh --profile server  # any other host
    ```
 
    Everything it replaces is copied to `~/.dotfiles-backup/<timestamp>/` first,
@@ -118,6 +139,28 @@ else.
 
 3. To roll back, run `dotfiles uninstall`, then
    `bash ~/.dotfiles-backup/<timestamp>/restore.sh`.
+
+What happens to the old local layer:
+
+- **`~/.localrc`.** The old setup created it on the first install and sourced it
+  from login bash and interactive zsh. When it exists, a marked block that
+  sources it is added to `~/.zshrc.local` and `~/.bashrc.local` (created if
+  missing, appended once otherwise), so interactive shells keep reading it.
+  `~/.localrc` itself is never touched. Over time, move its entries to the
+  file that fits ([Local layer](#local-layer)) and drop the block.
+- **`GNUPGHOME`.** When the old shells export it as a plain path (`$HOME/...`,
+  `~/...`, `$XDG_CONFIG_HOME/...`) and that directory holds keys, a marked
+  `export GNUPGHOME="$HOME/..."` goes into `~/.config/dotfiles/env.local`.
+  Without it gpg would look in `~/.gnupg` and find no keys.
+- **Report.** The old shell files are scanned (the old checkout only, no walk of
+  your home) for files they source or test and for variables that relocate
+  state (`GNUPGHOME`, `ZDOTDIR`, `HISTFILE`, `XDG_*_HOME`). Each file that exists
+  and each such variable is listed with its fate: `kept`, `carried to
+  env.local`, `history migrated to ~/.zsh_history` or `no longer read`. It is
+  information only and never stops the migration.
+- `restore.sh` removes a file the migration created while it is unchanged, and
+  cuts the marked block out of a file that existed before (byte for byte what
+  it was). A file or block you edited since is kept, with a warning.
 
 The migration installs from the checkout it runs in, so `dotfiles update` has no
 source yet. Set `DOTFILES_REPO=<repo url>` when running the migration (or run
