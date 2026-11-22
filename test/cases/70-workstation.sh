@@ -278,6 +278,11 @@ zsh_i 'for f in $precmd_functions; do $f; done' >/dev/null
 assert_eq "$(n_calls)" 0 "the precmd hooks make zero mise calls"
 assert_eq "$(bash_i 'eval "$PROMPT_COMMAND"')" "" "the PROMPT_COMMAND entries make zero mise calls and print nothing"
 assert_eq "$(n_calls)" 0 "bash: still zero"
+# A reload (`source ~/.zshrc`, `source ~/.bashrc`) leaves WSL1 mode as it is: nothing printed, the
+# venv still first and not repeated, not activated, and no mise call.
+assert_eq "$(zsh_i "source ~/.zshrc; print -r -- \${PATH%%:*} \${#\${(M)path:#$venv/bin}} \${+functions[_mise_hook]}")" "$venv/bin 1 0" "zsh: source ~/.zshrc is clean and keeps WSL1 mode"
+assert_eq "$(bash_i 'source ~/.bashrc; echo "${PATH%%:*} $(declare -F _mise_hook | wc -l | tr -d " ")"')" "$venv/bin 0" "bash: source ~/.bashrc is clean and keeps WSL1 mode"
+assert_eq "$(n_calls)" 0 "a reload makes zero mise calls"
 # A project config switches to the real activation.
 mkdir -p "$HOME/proj-test"
 printf '[tools]\n' >"$HOME/proj-test/mise.toml"

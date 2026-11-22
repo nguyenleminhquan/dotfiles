@@ -161,6 +161,13 @@ fi
 # starts inside a project (the real activation is needed there anyway) or when
 # the cache cannot be made. The helpers come from shell/env.sh.
 _df_mise_wsl1_start() {
+  # A reload (`source ~/.zshrc`, `source ~/.bashrc`) of a shell that is in WSL1 mode leaves it as it
+  # is: the dirs and the hooks are in place, and so is no mise call. env.sh re-runs for bash and puts
+  # the shims in front again, so the cached dirs are moved back in front (no duplicates).
+  if [[ -n ${_df_mise_wsl1_bin:-} ]]; then
+    if typeset -f _df_path_add_list >/dev/null 2>&1; then _df_path_add_list front "$_df_mise_wsl1_dirs"; fi
+    return 0
+  fi
   typeset -f _df_mise_cache_read >/dev/null 2>&1 || return 1
   _df_wsl_detect
   [[ $_df_wsl == 1 ]] || return 1
@@ -247,14 +254,18 @@ if [[ $_df_mise_hook_bash == 1 ]]; then
   _df_prompt_command_add _df_mise_prompt
 fi
 
-unset -f _df_tool_path _df_init_cache _df_mise_wsl1_start _df_wsl_detect _df_mise_cache_read _df_mise_cache_check _df_path_add_list
-# Without WSL1 mode nothing of it stays behind (zsh complains about a function that
-# was never defined, hence the loop).
+unset -f _df_tool_path _df_init_cache _df_mise_wsl1_start
+# What env.sh defined for this file (it runs once per shell, so a reload of ~/.zshrc finds none of
+# it) and, without WSL1 mode, what that mode needs: zsh complains about a function that is not
+# defined, hence the loop.
+for _df_uf in _df_wsl_detect _df_mise_cache_read _df_mise_cache_check _df_path_add_list; do
+  unset -f "$_df_uf" 2>/dev/null
+done
 if [[ -z ${_df_mise_wsl1_bin:-} ]]; then
   for _df_uf in _df_mise_switch _df_mise_in_project _df_mise_prompt _df_mise_prompt_stop; do
     unset -f "$_df_uf" 2>/dev/null
   done
-  unset _df_uf
 fi
+unset _df_uf
 unset _df_tools_profile _df_sh _df_tp _df_use_tools _df_tdir _df_starship _df_starship_file _df_init_file
 unset _df_mc _df_mise_dirs _df_mise_bin _df_mise_hook_bash _df_wsl

@@ -733,6 +733,16 @@ else
     assert_eq "$(wz 'print -r -- ${+functions[_mise_hook]}')" 1 "WSL1 zsh: a PATH line mise prints in another form falls back to mise activate"
     unset DF_TEST_MISE_DQ
     assert_file_absent "$cache"
+    # Reloading with `source ~/.zshrc` (env.sh is not run again, so what it defined is gone after the
+    # first start): clean, and a reload in WSL1 mode leaves WSL1 mode as it was, with no second
+    # prepend of the dirs, no second chpwd hook and no mise call.
+    wz 'exit' >/dev/null # a fresh cache
+    reset_logs
+    assert_eq "$(wz "source ~/.zshrc; print -r -- \${(j: :)\${(s.:.)PATH}[1,3]}")" "$fxw/venv/bin $fxw/tools/a $fxw/tools/b" "WSL1 zsh: source ~/.zshrc prints nothing and keeps the cached dirs in front"
+    assert_eq "$(wz "source ~/.zshrc; print -r -- \${#\${(M)path:#$fxw/tools/a}} \${#\${(M)chpwd_functions:#_df_mise_chpwd}} \${+functions[_mise_hook]}")" "1 1 0" "WSL1 zsh: a reload prepends the dirs once, keeps one chpwd hook and does not activate"
+    assert_eq "$(wz "source ~/.zshrc; source ~/.zshrc; print -r -- \$VIRTUAL_ENV")" "$fxw/venv" "WSL1 zsh: two reloads are clean too"
+    assert_eq "$(calls "$fxw/log")" 0 "WSL1 zsh: a reload makes zero mise calls"
+    assert_eq "$(wz "cd $fxw/proj/sub; source ~/.zshrc; print -r -- \${+functions[_mise_hook]}")" 1 "WSL1 zsh: a reload after the switch is clean and stays activated"
     # Native Linux and WSL2: mise activate as always, nothing cached.
     for PV in /nonexistent "$wsl2"; do
       rm -f "$cache"; reset_logs
@@ -740,6 +750,7 @@ else
       assert_ok "and activate ran" -- grep -q '^activate zsh' "$fxw/log"
       assert_eq "$(grep -c '^env ' "$fxw/log" || true)" 0 "zsh without WSL1 ($PV): no cache is generated"
       assert_file_absent "$cache"
+      assert_eq "$(wz 'source ~/.zshrc; print -r -- ${+functions[_mise_hook]}')" 1 "zsh without WSL1 ($PV): source ~/.zshrc is clean"
     done
     PV="$wsl1"
   fi
@@ -769,6 +780,22 @@ rc=4" "WSL1 bash: the prompt hook hands the exit status on"
   WZ_DIR="$fxw/proj"
   assert_eq "$(wb 'echo "@@$(declare -F _mise_hook)@@"')" "_mise_hook" "WSL1 bash: started inside a project: activated"
   WZ_DIR="$HOME"
+  # `source ~/.bashrc`: no stderr, the cached dirs still in front (env.sh puts the shims there
+  # first), one PROMPT_COMMAND entry of ours, no activation and no mise call.
+  wb 'true' >/dev/null # a fresh cache
+  reset_logs
+  assert_eq "$(wb 'source ~/.bashrc 2>'"$fxw"'/err
+IFS=: read -ra p <<<"$PATH"; echo "@@${p[0]} ${p[1]} ${p[2]}@@"
+echo "@@$(wc -c <'"$fxw"'/err | tr -d " ")@@"
+echo "@@$(grep -o _df_mise_prompt <<<"$PROMPT_COMMAND" | wc -l | tr -d " ") $(declare -F _mise_hook | wc -l | tr -d " ")@@"')" "$fxw/venv/bin $fxw/tools/a $fxw/tools/b
+0
+1 0" "WSL1 bash: source ~/.bashrc keeps WSL1 mode (dirs in front, no stderr, one hook entry, not activated)"
+  assert_eq "$(calls "$fxw/log")" 0 "WSL1 bash: a reload makes zero mise calls"
+  assert_eq "$(wb 'cd '"$fxw"'/proj/sub
+source ~/.bashrc 2>'"$fxw"'/err
+echo "@@$(wc -c <'"$fxw"'/err | tr -d " ")@@"
+echo "@@$(declare -F _mise_hook)@@"')" "0
+_mise_hook" "WSL1 bash: a reload after the switch is clean and stays activated"
   # Non-interactive shells: the real dirs replace the shims, appended last, nothing printed, no mise.
   wb 'true' >/dev/null
   sleep 1
@@ -795,6 +822,8 @@ rc=4" "WSL1 bash: the prompt hook hands the exit status on"
   assert_eq "$(path_tail bash)" "$HOME/.local/share/mise/shims" "native non-interactive bash: the shims"
   reset_logs
   assert_eq "$(wb 'echo "@@$(declare -F _mise_hook)@@"')" "_mise_hook" "native bash: mise activate runs"
+  assert_eq "$(wb 'source ~/.bashrc 2>'"$fxw"'/err
+echo "@@$(wc -c <'"$fxw"'/err | tr -d " ")@@"')" "0" "native bash: source ~/.bashrc has no stderr"
   assert_ok "and activate was called" -- grep -q '^activate bash' "$fxw/log"
   assert_file_absent "$cache"
   PV="$wsl1"
