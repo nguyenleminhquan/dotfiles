@@ -152,6 +152,8 @@ df_gen_all_remove
 restore_original
 
 df_caches_remove
+# Left empty by it (the doctor at the end of an install starts a zsh, which creates them): only empty ones go.
+rmdir "$HOME/.cache/zsh" "$HOME/.cache/dotfiles" "$HOME/.cache" 2>/dev/null || true
 rm -f -- "$HOME/.config/dotfiles/profile" "$HOME/.config/dotfiles/links" "$HOME/.config/dotfiles/generated" "$HOME/.config/dotfiles/dir" "$HOME/.config/dotfiles/repo"
 
 if [ "$purge" = 1 ]; then

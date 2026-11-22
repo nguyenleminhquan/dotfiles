@@ -153,6 +153,8 @@ printf '#!/bin/sh\n:\n' >"$fx/.local/bin/mise"
 printf '#!/bin/sh\necho fake kubectl\n' >"$fx/.local/share/mise/shims/kubectl"
 chmod +x "$fx/.local/bin/mise" "$fx/.local/share/mise/shims/kubectl"
 printf 'mise-bin\nmise-data\n' >"$fx/.config/dotfiles/tools"
+# The install is recorded as ours, so that the data directory goes with the downgrade.
+printf 'aqua-k/1\n' >"$fx/.config/dotfiles/mise-installs"
 kubectl_lookup() { env -i HOME="$fx" PATH=/usr/bin:/bin bash -lc 'command -v kubectl || echo none'; }
 assert_eq "$(kubectl_lookup)" "$fx/.local/share/mise/shims/kubectl" "server profile reaches kubectl through the shims"
 inst --profile minimal
@@ -199,9 +201,10 @@ install_server
 printf 'full server install took %ss\n' "$(( $(date +%s) - t0 ))" >&2
 # Generating the completions runs k9s, which creates ~/.local/state/k9s when it
 # runs normally; the installer must not leave that behind. The test has run no
-# tool yet, so either of these existing would be the installer's doing.
+# tool yet, so it existing would be the installer's doing. (starship's own cache
+# is not checked: the doctor at the end of the install starts an interactive zsh,
+# which runs starship, as every real session does.)
 assert_file_absent "$HOME/.local/state/k9s"
-assert_file_absent "$HOME/.cache/starship"
 
 # case_tools_run: every tool of the config runs here (u20-* has glibc 2.31),
 # found through the login shell's PATH like a real session would.
@@ -339,7 +342,9 @@ assert_ok "unchanged completions keep the dump" -- test -e "$HOME/.cache/zsh/zco
 rm -f "$HOME/.cache/zsh/completions/_kubectl"
 install_server
 assert_ok "a changed completion set regenerates the file" -- grep -q '^#compdef' "$HOME/.cache/zsh/completions/_kubectl"
-assert_file_absent "$HOME/.cache/zsh/zcompdump"
+# The doctor at the end of the install starts a zsh, which writes a fresh dump:
+# what must be gone is the old one.
+assert_fail "a changed completion set drops the old zsh dump" -- grep -qx x "$HOME/.cache/zsh/zcompdump"
 assert_eq "$(wc -l <"$HOME/.config/dotfiles/mise-installs" | tr -d ' ')" "${#tool_cmds[@]}" "a second install records nothing twice"
 assert_eq "$(zsh_i 'print -r -- ${_comps[kubectl]}')" "_kubectl" "the rebuilt dump knows kubectl"
 
@@ -405,7 +410,6 @@ install_small() {
 # What a downgrade to minimal must leave: no tool on PATH, no link to the mise or
 # starship configuration, nothing of what the installer downloaded or generated.
 assert_downgraded() { # <scenario>
-  assert_file_absent "$HOME/.config/mise/config.toml"
   assert_file_absent "$HOME/.config/mise/conf.d/dotfiles.toml"
   assert_file_absent "$HOME/.config/starship.toml"
   assert_eq "$(bash -lc 'command -v kubectl || echo none')" none "$1: kubectl is gone from PATH"
@@ -415,7 +419,9 @@ assert_downgraded() { # <scenario>
            .config/dotfiles/zsh-bin-files; do
     assert_file_absent "$HOME/$p"
   done
-  assert_fail "$1: no zcompdump left" -- bash -c 'ls ~/.cache/zsh/zcompdump* 2>/dev/null | grep -q .'
+  # The doctor at the end of the install starts a zsh, which writes a dump again;
+  # it must not know the completions that were taken away.
+  assert_fail "$1: no kubectl completion in the zsh dump" -- grep -q kubectl "$HOME/.cache/zsh/zcompdump"
   assert_eq "$(cat "$HOME/.config/dotfiles/profile")" minimal "$1: profile is minimal again"
   assert_ok "$1: minimal links are still in place" -- test -L "$HOME/.bashrc"
   assert_eq "$(bash -c '. ~/.bashrc; echo ok' 2>&1)" ok "$1: shell works after the downgrade"
@@ -452,6 +458,7 @@ assert_downgraded "NO_TOOLS downgrade"
 assert_eq "$(cat "$HOME/.tool-versions")" "jq 1.8.2" "the user's ~/.tool-versions is untouched"
 assert_ok "the user's ~/mise.toml is untouched" -- test -f "$HOME/mise.toml"
 assert_ok "the user's conf.d file is untouched" -- test -f "$HOME/.config/mise/conf.d/extra.toml"
+assert_ok "the user's global mise config is untouched" -- grep -q ripgrep "$HOME/.config/mise/config.toml"
 rm -rf "$HOME/.tool-versions" "$HOME/mise.toml" "$HOME/.config/mise"
 
 # --- case_profile_downgrade_to_minimal ------------------------------------------------
@@ -489,5 +496,5 @@ assert_ok "purge keeps the tool the user installed" -- "$age_bin" --version
 assert_ok "purge keeps the user's config" -- grep -q 'FiloSottile/age' "$user_cfg"
 assert_file_absent "$HOME/.config/mise/conf.d/dotfiles.toml"
 assert_file_absent "$HOME/.local/bin/mise"
-assert_eq "$(find "$HOME/.local/share/mise/installs" -mindepth 1 -maxdepth 1 -printf '%f\n' | grep -vci age || true)" 0 "purge removed every install of ours"
+assert_eq "$(find "$HOME/.local/share/mise/installs" -mindepth 1 -maxdepth 1 ! -name '.*' -printf '%f\n' | grep -vci age || true)" 0 "purge removed every install of ours"
 rm -rf "$HOME/.local/share/mise" "$HOME/.local/state/mise" "$HOME/.cache/mise" "$HOME/.cache/sigstore-rust" "$HOME/.config/mise"

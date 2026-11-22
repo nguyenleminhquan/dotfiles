@@ -381,7 +381,7 @@ _df_tools_remove_zsh_bin() {
 # when we created it AND nothing else is installed in it: whatever the user
 # installed since (`mise use -g`, `mise install`) is theirs and stays.
 _df_tools_remove_mise() {
-  local list data="$HOME/.local/share/mise" p mise own=0 removed=0
+  local list data="$HOME/.local/share/mise" p mise tool_dir own=0 removed=0
   list="$(_df_tools_dir)/mise-installs"
   if _df_tools_marked mise-data; then own=1; fi
   if [ -f "$list" ]; then
@@ -389,7 +389,17 @@ _df_tools_remove_mise() {
     while IFS= read -r p; do
       case "$p" in '' | /* | *..*) continue ;; esac
       rm -rf -- "${data:?}/installs/$p"
-      rmdir -- "$data/installs/${p%/*}" 2>/dev/null || true
+      # What mise keeps next to the versions (links such as latest and global,
+      # .mise.backend.toml) goes with the last version; with another version
+      # left (the user's) only the links that now dangle are dropped.
+      tool_dir="$data/installs/${p%/*}"
+      if [ -d "$tool_dir" ]; then
+        if [ -z "$(find "$tool_dir" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null)" ]; then
+          rm -rf -- "$tool_dir"
+        else
+          find "$tool_dir" -mindepth 1 -maxdepth 1 -xtype l -delete 2>/dev/null || true
+        fi
+      fi
     done <"$list"
     rm -f -- "$list"
     log_info "removed the tools installed by mise"
