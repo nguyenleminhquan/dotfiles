@@ -491,8 +491,11 @@ printf 'db\n' >"$HOME/.local/share/zoxide/db.zo"
 bash "$HOME/.dotfiles/uninstall.sh" --purge >/dev/null 2>&1
 assert_eq "$(cat "$HOME/.local/share/zoxide/db.zo" 2>/dev/null)" db "purge keeps the zoxide database"
 rm -rf "$HOME/.local/share/zoxide"
-# The directory that held it goes only when it did not exist before the install.
-grep -qx './.local/share' <<<"$tree_before" || rmdir "$HOME/.local/share" 2>/dev/null || true
+# The directories that held it (the purge could not remove them) go too, unless
+# they existed before the install.
+for d in .local/share .local; do
+  grep -qx "./$d" <<<"$tree_before" || rmdir "$HOME/$d" 2>/dev/null || true
+done
 assert_eq "$(tree_of)" "$tree_before" "purge restores the home tree of before the first install"
 assert_fail "no zcompdump left" -- bash -c 'ls ~/.cache/zsh/zcompdump* 2>/dev/null | grep -q .'
 assert_eq "$(bash -lc 'command -v kubectl || echo none')" none "no kubectl after purge"
