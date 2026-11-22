@@ -202,6 +202,22 @@ assert_file_absent "$HOME/.config/dotfiles/profile"
 assert_eq "$(cat "$HOME/.bashrc")" "alias mine=1" "custom .bashrc restored after purge"
 assert_pre_install_state
 
+# --- case_zoxide_data_is_kept: ~/.local/share/zoxide is the user's, like the shell
+# history; neither uninstall nor --purge removes it.
+had_share=0
+[ -d "$HOME/.local/share" ] && had_share=1
+mkdir -p "$HOME/.local/share/zoxide"
+printf 'db\n' >"$HOME/.local/share/zoxide/db.zo"
+run_install --profile "$DF_PROFILE"
+bash "$dotfiles_dir/uninstall.sh"
+assert_eq "$(cat "$HOME/.local/share/zoxide/db.zo" 2>/dev/null)" "db" "uninstall keeps the zoxide data"
+run_install --profile "$DF_PROFILE"
+bash "$dotfiles_dir/uninstall.sh" --purge
+assert_eq "$(cat "$HOME/.local/share/zoxide/db.zo" 2>/dev/null)" "db" "uninstall --purge keeps the zoxide data"
+rm -rf "$HOME/.local/share/zoxide"
+if [ "$had_share" = 0 ]; then rmdir "$HOME/.local/share" "$HOME/.local" 2>/dev/null || true; fi
+assert_pre_install_state
+
 # --- Safety scenarios -----------------------------------------------------------
 # Each one starts from a clean installer state; $HOME dotfiles are back to
 # their original content after the purge above.

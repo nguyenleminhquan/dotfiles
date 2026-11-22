@@ -20,6 +20,7 @@ download_cache = false
 # Shell
 "github:starship/starship" = { version = "1.27.0", asset_pattern = "*x86_64-unknown-linux-musl.tar.gz" }
 "aqua:junegunn/fzf" = "0.75.0"
+"aqua:ajeetdsouza/zoxide" = "0.10.0"
 
 # Kubernetes
 "aqua:kubernetes/kubernetes/kubectl" = "1.37.2"

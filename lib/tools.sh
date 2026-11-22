@@ -21,8 +21,9 @@ ZSH_BIN_TAG=v6.1.1
 ZSH_BIN_INSTALL_SHA256=fc052f5637a95887a4b58cc2bf8eb336a4e90e35e65256abec48ebd02b25e2a2
 # Oldest zsh the shell setup is written for; older ones get zsh-bin.
 DF_MIN_ZSH=5.8
-# Tools whose zsh completion is generated at install time.
-DF_COMPLETION_TOOLS=(kubectl helm k9s argocd talosctl task mise)
+# Tools whose zsh completion is generated at install time: ours (mise) and the
+# host's own (docker, crictl, podman, gh), whichever of them are installed.
+DF_COMPLETION_TOOLS=(kubectl helm k9s argocd talosctl task mise docker crictl podman gh)
 
 _df_tools_dir() { printf '%s/.config/dotfiles' "$HOME"; }
 
@@ -300,6 +301,7 @@ _df_tool_real() {
 # completion file may be left behind by this step.
 df_gen_completions() {
   local dir="$HOME/.cache/zsh/completions" tool real out cur changed=0 scratch
+  local -a args
   mkdir -p "$dir"
   scratch="$(_df_mktemp_dir)" || {
     log_error "cannot create a temporary directory under ${XDG_CACHE_HOME:-$HOME/.cache}"
@@ -313,11 +315,13 @@ df_gen_completions() {
       fi
       continue
     fi
-    # go-task has a flag instead of a subcommand.
+    # go-task has a flag instead of a subcommand, gh wants the shell as `-s zsh`.
     case "$tool" in
-      task) out="$(XDG_STATE_HOME="$scratch/state" XDG_DATA_HOME="$scratch/data" XDG_CONFIG_HOME="$scratch/config" XDG_CACHE_HOME="$scratch/cache" "$real" --completion zsh 2>/dev/null)" || out='' ;;
-      *) out="$(XDG_STATE_HOME="$scratch/state" XDG_DATA_HOME="$scratch/data" XDG_CONFIG_HOME="$scratch/config" XDG_CACHE_HOME="$scratch/cache" "$real" completion zsh 2>/dev/null)" || out='' ;;
+      task) args=(--completion zsh) ;;
+      gh) args=(completion -s zsh) ;;
+      *) args=(completion zsh) ;;
     esac
+    out="$(XDG_STATE_HOME="$scratch/state" XDG_DATA_HOME="$scratch/data" XDG_CONFIG_HOME="$scratch/config" XDG_CACHE_HOME="$scratch/cache" "$real" "${args[@]}" 2>/dev/null)" || out=''
     case "$out" in
       '#compdef'*) ;;
       *)

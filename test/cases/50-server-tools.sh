@@ -121,6 +121,69 @@ assert_eq "$(home_hash)" "$h0" "dry run changes nothing"
 assert_file_absent "$HOME/.local/bin/mise"
 assert_file_absent "$HOME/.local/share/mise"
 
+
+# --- case_system_tool_completions: docker, crictl, podman and gh (no network) ------------
+# Stub tools on a private PATH; no mise is reachable, so each tool is found as the
+# host's own binary. df_gen_completions must keep only output that starts with
+# #compdef, call gh as `completion -s zsh`, run the tools with scratch XDG
+# directories, and drop the file of a tool that is gone.
+(
+  # shellcheck source=/dev/null
+  . /src/lib/log.sh
+  # shellcheck source=/dev/null
+  . /src/lib/tools.sh
+  fx="$(mktemp -d)"
+  export HOME="$fx"
+  export PATH="$fx/bin:/usr/bin:/bin"
+  mkdir -p "$fx/bin"
+  comp="$fx/.cache/zsh/completions"
+  # docker: a good script, and it records the XDG directory it was given.
+  cat >"$fx/bin/docker" <<STUB
+#!/bin/sh
+[ "\$1 \$2" = "completion zsh" ] || exit 1
+printf '%s\n' "\$XDG_CONFIG_HOME" >>"$fx/docker-xdg"
+printf '#compdef docker\n_docker() { :; }\n'
+STUB
+  # gh: only `completion -s zsh` works.
+  cat >"$fx/bin/gh" <<'STUB'
+#!/bin/sh
+[ "$1 $2 $3" = "completion -s zsh" ] || { echo 'unknown flag'; exit 1; }
+printf '#compdef gh\n_gh() { :; }\n'
+STUB
+  # podman: exits 0 but prints something that is no completion script.
+  printf '#!/bin/sh\necho "not a completion script"\n' >"$fx/bin/podman"
+  chmod +x "$fx/bin/docker" "$fx/bin/gh" "$fx/bin/podman"
+  # A leftover of a tool that is not installed (crictl) has to go.
+  mkdir -p "$comp"
+  printf '#compdef crictl\n' >"$comp/_crictl"
+  printf 'x\n' >"$fx/.cache/zsh/zcompdump"
+  out="$(df_gen_completions 2>&1)"
+  assert_ok "docker completion is generated" -- grep -q '^#compdef docker' "$comp/_docker"
+  assert_ok "gh completion is generated with -s zsh" -- grep -q '^#compdef gh' "$comp/_gh"
+  assert_file_absent "$comp/_podman"
+  assert_ok "garbage from podman is only a warning" -- grep -q 'no zsh completion from podman' <<<"$out"
+  assert_fail "no warning for a tool that works" -- grep -q 'no zsh completion from docker' <<<"$out"
+  assert_fail "no warning for a tool that is not installed" -- grep -q 'crictl' <<<"$out"
+  assert_file_absent "$comp/_crictl"
+  assert_file_absent "$fx/.cache/zsh/zcompdump"
+  case "$(cat "$fx/docker-xdg")" in
+    "$fx"/.cache/dotfiles.*/config) ;;
+    *) _fail "docker ran with a scratch XDG_CONFIG_HOME, got: $(cat "$fx/docker-xdg")" ;;
+  esac
+  assert_eq "$(find "$comp" -mindepth 1 -printf '%f\n' | LC_ALL=C sort | tr '\n' ' ')" "_docker _gh " "only the working completions are left"
+  assert_eq "$(find "$fx/.cache" -mindepth 1 -maxdepth 1 -printf '%f\n' | tr '\n' ' ')" "zsh " "the scratch directory is removed"
+
+  # Unchanged output keeps the dump; a tool that goes away drops its file and the dump.
+  printf 'x\n' >"$fx/.cache/zsh/zcompdump"
+  assert_eq "$(df_gen_completions 2>&1 | grep -c 'completions updated' || true)" 0 "unchanged completions are not announced"
+  assert_ok "unchanged completions keep the dump" -- test -e "$fx/.cache/zsh/zcompdump"
+  rm -f "$fx/bin/docker"
+  df_gen_completions >/dev/null 2>&1
+  assert_file_absent "$comp/_docker"
+  assert_ok "gh stays" -- test -e "$comp/_gh"
+  assert_file_absent "$fx/.cache/zsh/zcompdump"
+  rm -rf "$fx"
+)
 # --- case_elf_interp_helper: the check used for the musl assertions below -----------
 assert_ok "a glibc binary names the glibc loader" -- grep -q 'ld-linux' <<<"$(elf_interp "$(command -v bash)")"
 
@@ -211,6 +274,7 @@ assert_file_absent "$HOME/.local/state/k9s"
 tool_cmds=(
   'github:starship/starship|starship --version'
   'aqua:junegunn/fzf|fzf --version'
+  'aqua:ajeetdsouza/zoxide|zoxide --version'
   'aqua:kubernetes/kubernetes/kubectl|kubectl version --client'
   'aqua:helm/helm|helm version --short'
   'aqua:helmfile/helmfile|helmfile --version'
@@ -251,6 +315,7 @@ for entry in "${tool_cmds[@]}"; do
   assert_ok "$cmd runs" -- bash -lc "$cmd"
 done
 assert_eq "$(grep -Ec '^"(aqua|github):' "$cfg")" "${#tool_cmds[@]}" "this test covers every tool in the config"
+assert_eq "$(bash -lc 'zoxide --version')" "zoxide 0.10.0" "zoxide is the pinned version"
 # helm stays on 3.x on purpose (the charts, plugins and GitOps repos in use are
 # helm 3): moving to 4 has to be a decision, not a side effect of a bump.
 assert_ok "config pins helm to 3.x" -- grep -Eq '^"aqua:helm/helm" = "3\.[0-9.]+"$' "$cfg"
@@ -331,6 +396,31 @@ assert_ok "bash Ctrl-R is fzf" -- \
 assert_eq "$(bash_i 'type -t mise')" function "bash activates mise"
 assert_eq "$(bash_i 'true')" "" "interactive bash prints nothing"
 
+# case_zoxide_fzf_tab_and_k: the shell additions that need the real tools.
+# zoxide: `z` and `zi` are functions, cd is left alone.
+assert_eq "$(zsh_i 'whence -w z zi cd')" "z: function
+zi: function
+cd: builtin" "zsh: z and zi come from zoxide, cd stays the builtin"
+assert_eq "$(bash_i 'type -t z zi' | tr '\n' ' ')" "function function " "bash: z and zi come from zoxide"
+assert_fail "bash: cd is not replaced by zoxide" -- grep -q zoxide <<<"$(bash_i 'declare -f cd')"
+assert_ok "the zoxide init script is cached" -- grep -q '^# df-init bin=.*/zoxide$' "$HOME/.cache/dotfiles/init/zoxide-zsh"
+# fzf-tab is loaded after compinit and before autosuggestions and fzf's bindings.
+# Those save the widget behind Tab as fzf_default_completion, which must be
+# fzf-tab's, so that plain Tab goes to fzf-tab and `**<Tab>` still opens fzf.
+assert_eq "$(zsh_load_order "$(pty "TERM=xterm-256color $zsh_bin -i -x -c exit")")" "compinit fzf-tab autosuggestions tools" "load order: compinit, fzf-tab, autosuggestions, tools.sh (fzf)"
+assert_eq "$(zsh_i 'print -r -- $+functions[fzf-tab-complete]')" 1 "fzf-tab is loaded"
+assert_eq "$(zsh_i 'bindkey "^I"')" '"^I" fzf-completion' "Tab is fzf's completion widget"
+assert_eq "$(zsh_i 'print -r -- $fzf_default_completion')" fzf-tab-complete "which falls back to fzf-tab, not to the stock widget"
+assert_eq "$(zsh_i 'zstyle -L ":completion:*" menu')" "zstyle ':completion:*' menu no" "fzf-tab sees the whole list: no zsh menu"
+assert_eq "$(zsh_i 'print -r -- ${_comps[kubectl]}')" "_kubectl" "kubectl completion is known"
+# k is kubectl, with kubectl's completion.
+assert_eq "$(zsh_i 'alias k')" "k=kubectl" "zsh: k is an alias of kubectl"
+assert_eq "$(zsh_i 'print -r -- ${_comps[k]}')" "_kubectl" "zsh: k completes like kubectl"
+assert_eq "$(bash_i 'type -t k')" alias "bash: k is an alias"
+assert_eq "$(bash_i 'alias k')" "alias k='kubectl'" "bash: k is an alias of kubectl"
+assert_eq "$(zsh_i 'exit')" "" "interactive zsh still prints nothing"
+assert_eq "$(bash_i 'exit')" "" "interactive bash still prints nothing"
+
 # case_completions
 for t in kubectl helm k9s argocd talosctl task mise; do
   assert_ok "completion generated for $t" -- grep -q '^#compdef' "$HOME/.cache/zsh/completions/_$t"
@@ -351,6 +441,18 @@ assert_ok "a changed completion set regenerates the file" -- grep -q '^#compdef'
 assert_fail "a changed completion set drops the old zsh dump" -- grep -qx x "$HOME/.cache/zsh/zcompdump"
 assert_eq "$(wc -l <"$HOME/.config/dotfiles/mise-installs" | tr -d ' ')" "${#tool_cmds[@]}" "a second install records nothing twice"
 assert_eq "$(zsh_i 'print -r -- ${_comps[kubectl]}')" "_kubectl" "the rebuilt dump knows kubectl"
+
+# case_docker_completion_in_the_install: a docker of the host (a stub here) is
+# completed by the install like our own tools, and its file goes with the binary.
+printf '#!/bin/sh\nprintf "#compdef docker\n_docker() { :; }\n"\n' >"$HOME/.local/bin/docker"
+chmod +x "$HOME/.local/bin/docker"
+install_server
+assert_ok "the install generates the docker completion" -- grep -q '^#compdef docker' "$HOME/.cache/zsh/completions/_docker"
+assert_eq "$(zsh_i 'print -r -- ${_comps[docker]}')" "_docker" "zsh knows the docker completion after the install"
+rm -f "$HOME/.local/bin/docker"
+install_server
+assert_file_absent "$HOME/.cache/zsh/completions/_docker"
+assert_eq "$(zsh_i 'print -r -- ${+_comps[docker]}')" "0" "and forgets it when docker is gone"
 
 # case_zsh_startup_median: warm up once (init caches, dump), then 10 starts.
 zsh_i exit >/dev/null
@@ -380,10 +482,17 @@ assert_eq "$(grep -cE '^FAIL +tool' <<<"$doctor_out" || true)" 0 "doctor finds e
 # that is the user's, not the installer's, and the test clears it so the listing
 # below sees only what the install created.
 rm -rf "$HOME/.local/state/k9s" "$HOME/.cache/starship"
+# The zoxide database is the user's, like the shell history: a purge keeps it.
+mkdir -p "$HOME/.local/share/zoxide"
+printf 'db\n' >"$HOME/.local/share/zoxide/db.zo"
 # Not a list of paths we know about: everything the install created, including
 # what the tools themselves create on the side (k9s state, the sigstore cache),
 # must be gone, so the home tree equals the one before the first install.
 bash "$HOME/.dotfiles/uninstall.sh" --purge >/dev/null 2>&1
+assert_eq "$(cat "$HOME/.local/share/zoxide/db.zo" 2>/dev/null)" db "purge keeps the zoxide database"
+rm -rf "$HOME/.local/share/zoxide"
+# The directory that held it goes only when it did not exist before the install.
+grep -qx './.local/share' <<<"$tree_before" || rmdir "$HOME/.local/share" 2>/dev/null || true
 assert_eq "$(tree_of)" "$tree_before" "purge restores the home tree of before the first install"
 assert_fail "no zcompdump left" -- bash -c 'ls ~/.cache/zsh/zcompdump* 2>/dev/null | grep -q .'
 assert_eq "$(bash -lc 'command -v kubectl || echo none')" none "no kubectl after purge"

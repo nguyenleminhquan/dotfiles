@@ -471,6 +471,99 @@ else
   assert_eq "$DF_ROW" "u20-nozsh" "only the no-zsh row lacks zsh"
 fi
 
+# --- case_tool_additions: zoxide, fzf-tab and the k completion -----------------
+# Stand-ins for the real tools (50-server-tools.sh runs the real ones): on the
+# minimal profile none of them may have any effect, whatever the host has on
+# PATH; on a profile with tools they are loaded, and fzf-tab before the rest.
+fx="$(mktemp -d)"
+mkdir "$fx/bin"
+cat >"$fx/bin/fzf" <<'STUB'
+#!/bin/sh
+# Like fzf 0.48+: `fzf --zsh` remembers the widget that Tab is bound to (the way
+# its completion.zsh does), then binds Tab itself.
+[ "$1" = --zsh ] || exit 0
+cat <<'ZSH'
+binding=$(bindkey '^I')
+[[ $binding =~ 'undefined-key' ]] || fzf_default_completion=$binding[(s: :w)2]
+unset binding
+fzf-completion() { :; }
+zle -N fzf-completion
+bindkey '^I' fzf-completion
+ZSH
+STUB
+printf '#!/bin/sh\nprintf "z() { :; }\nzi() { :; }\n"\n' >"$fx/bin/zoxide"
+printf '#!/bin/sh\n:\n' >"$fx/bin/kubectl"
+chmod +x "$fx/bin/fzf" "$fx/bin/zoxide" "$fx/bin/kubectl"
+rm -rf ~/.cache/dotfiles/init
+
+# Non-interactive shells print nothing and load nothing, in every profile.
+assert_eq "$(PATH="$fx/bin:$PATH" bash -c '. ~/.bashrc; echo ok' 2>&1)" ok "ssh-like bash with the tools on PATH prints nothing"
+assert_eq "$(PATH="$fx/bin:$PATH" bash -lc 'echo ok' 2>&1)" ok "bash -lc with the tools on PATH prints nothing"
+assert_file_absent "$HOME/.cache/dotfiles/init"
+
+# bash: z is zoxide's on a tools profile only; k completes like kubectl once its
+# completion function is there (a file of ~/.bashrc.d, here), and not before.
+bash_probe() { printf '%s\nexit\n' "$1" | PATH="$fx/bin:$PATH" DOTFILES_IN_ZSH=1 TERM=xterm-256color bash -i 2>/dev/null; }
+if [ "$DF_PROFILE" = minimal ]; then
+  assert_eq "$(bash_probe 'type -t z')" "" "minimal bash: no zoxide"
+  assert_file_absent "$HOME/.cache/dotfiles/init"
+else
+  assert_eq "$(bash_probe 'type -t z')" function "tools profile bash: zoxide is initialised"
+  assert_ok "and cached" -- test -r "$HOME/.cache/dotfiles/init/zoxide-bash"
+fi
+assert_eq "$(bash_probe 'complete -p k 2>&1 || true')" "bash: complete: k: no completion specification" "bash: no completion for k without kubectl's function"
+mkdir -p ~/.bashrc.d
+printf '__start_kubectl() { :; }\n' >~/.bashrc.d/kubectl-completion.sh
+assert_eq "$(bash_probe 'complete -p k')" "complete -o default -F __start_kubectl k" "bash: k completes with kubectl's function"
+rm -rf ~/.bashrc.d
+
+if [ "$has_zsh" = 1 ]; then
+  zsh_stub() { timeout 30 script -qec "TERM=xterm-256color PATH=$fx/bin:\$PATH zsh -i -c '$1'" /dev/null </dev/null | tr -d '\r'; }
+  # The xtrace of a whole start, for the order in which ~/.zshrc loads things.
+  zsh_stub_x() { timeout 30 script -qec "TERM=xterm-256color PATH=$fx/bin:\$PATH zsh -i -x -c exit" /dev/null </dev/null | tr -d '\r'; }
+  if [ "$DF_PROFILE" = minimal ]; then
+    assert_eq "$(zsh_load_order "$(zsh_stub_x)")" "compinit autosuggestions tools" "minimal zsh: the load order has no fzf-tab"
+    assert_eq "$(zsh_stub 'print -r -- $+functions[fzf-tab-complete]')" 0 "minimal zsh: fzf-tab is not loaded"
+    assert_eq "$(zsh_stub 'bindkey "^I"')" '"^I" expand-or-complete' "minimal zsh: Tab is the stock widget"
+    assert_eq "$(zsh_stub 'whence -w z')" "z: none" "minimal zsh: no zoxide"
+    assert_eq "$(zsh_stub 'zstyle -L ":completion:*" menu')" "zstyle ':completion:*' menu select" "minimal zsh: completion menu unchanged"
+    assert_file_absent "$HOME/.cache/dotfiles/init"
+  else
+    assert_eq "$(zsh_stub 'print -r -- $+functions[fzf-tab-complete]')" 1 "tools profile zsh: fzf-tab is loaded"
+    assert_eq "$(zsh_stub 'bindkey "^I"')" '"^I" fzf-completion' "fzf's bindings come last"
+    assert_eq "$(zsh_stub 'print -r -- $fzf_default_completion')" fzf-tab-complete "fzf falls back to fzf-tab, so fzf-tab was loaded before it"
+    assert_eq "$(zsh_load_order "$(zsh_stub_x)")" "compinit fzf-tab autosuggestions tools" "load order: compinit, fzf-tab, autosuggestions, tools.sh (fzf)"
+    assert_eq "$(zsh_stub 'whence -w z')" "z: function" "tools profile zsh: zoxide is initialised"
+    assert_ok "and cached" -- test -r "$HOME/.cache/dotfiles/init/zoxide-zsh"
+    # fzf-tab needs fzf: a profile with tools but no fzf keeps the stock Tab.
+    rm "$fx/bin/fzf"
+    assert_eq "$(zsh_stub 'print -r -- $+functions[fzf-tab-complete]')" 0 "tools profile without fzf: fzf-tab is not loaded"
+    assert_eq "$(zsh_stub 'bindkey "^I"')" '"^I" expand-or-complete' "tools profile without fzf: Tab is the stock widget"
+  fi
+  assert_eq "$(PATH="$fx/bin:$PATH" zsh -c 'echo ok' 2>&1 </dev/null)" ok "non-interactive zsh with the tools on PATH prints nothing"
+  assert_eq "$(PATH="$fx/bin:$PATH" zsh -lc 'echo ok' 2>&1 </dev/null)" ok "zsh -lc with the tools on PATH prints nothing"
+  # Not on a terminal: nothing to bind keys on, same gate as fzf.
+  assert_eq "$(PATH="$fx/bin:$PATH" zsh -ic 'print -r -- $+functions[fzf-tab-complete]' 2>&1 </dev/null)" 0 "no terminal on stdin: fzf-tab is not loaded"
+
+  # k completes like kubectl when kubectl and its completion exist; a k alias of
+  # the user's (~/.zshrc.local) replaces the alias but not the completion.
+  mkdir -p ~/.cache/zsh/completions
+  printf '#compdef kubectl\n_kubectl() { :; }\n' >~/.cache/zsh/completions/_kubectl
+  rm -f ~/.cache/zsh/zcompdump*
+  assert_eq "$(zsh_stub 'print -r -- ${_comps[k]}')" "_kubectl" "zsh: k completes like kubectl"
+  assert_eq "$(zsh_stub 'alias k')" "k=kubectl" "zsh: k is the kubectl alias"
+  printf "alias k='kubectl -n kube-system'\n" >~/.zshrc.local
+  assert_eq "$(zsh_stub 'alias k; print -r -- ${_comps[k]}')" "k='kubectl -n kube-system'
+_kubectl" "zsh: the user's own k alias wins, the completion stays"
+  rm -f ~/.zshrc.local
+  assert_eq "$(zsh_stub 'print -r -- ${+_comps[k]}')" 1 "zsh: and the completion is there without the local file"
+  rm "$fx/bin/kubectl"
+  rm -f ~/.cache/zsh/zcompdump*
+  assert_eq "$(zsh_stub 'print -r -- ${+_comps[k]}')" 0 "zsh: no kubectl, no completion for k"
+  rm -rf ~/.cache/zsh/completions ~/.cache/zsh/zcompdump*
+fi
+rm -rf "$fx" ~/.cache/dotfiles/init
+
 # --- non-interactive stays silent with the full bashrc ------------------------
 assert_eq "$(bash -c '. ~/.bashrc; echo ok' 2>&1)" "ok" "ssh-like bashrc still silent and stderr-clean"
 assert_eq "$(bash -lc 'echo ok' 2>&1)" "ok" "bash -lc still silent"

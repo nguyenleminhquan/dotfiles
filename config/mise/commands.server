@@ -4,6 +4,7 @@
 # file and config.toml list different tools, so change both together.
 starship github:starship/starship
 fzf aqua:junegunn/fzf
+zoxide aqua:ajeetdsouza/zoxide
 kubectl aqua:kubernetes/kubernetes/kubectl
 helm aqua:helm/helm
 helmfile aqua:helmfile/helmfile

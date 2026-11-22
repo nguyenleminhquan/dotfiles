@@ -33,6 +33,11 @@ compinit -C -d "$HOME/.cache/zsh/zcompdump"
 zstyle ':completion:*' menu select
 zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'
 
+# `k` completes like kubectl (the alias itself is in shell/aliases.sh). Needs
+# kubectl's completion in the dump; a `k` alias defined later by the user wins.
+# shellcheck disable=SC2154  # zsh parameters
+if (( $+commands[kubectl] && $+_comps[kubectl] )); then compdef k=kubectl; fi
+
 # Keys: emacs style, a few terminfo keys, and incremental history search.
 bindkey -e
 zmodload -F zsh/terminfo +p:terminfo 2>/dev/null
@@ -40,6 +45,27 @@ zmodload -F zsh/terminfo +p:terminfo 2>/dev/null
 [[ -n ${terminfo[kend]:-} ]] && bindkey "${terminfo[kend]}" end-of-line
 [[ -n ${terminfo[kdch1]:-} ]] && bindkey "${terminfo[kdch1]}" delete-char
 bindkey '^R' history-incremental-pattern-search-backward
+
+# fzf-tab replaces the completion menu with fzf. Upstream wants it after compinit
+# and BEFORE plugins that wrap widgets (zsh-autosuggestions), and fzf's own key
+# bindings (shell/tools.sh) after it: they save the Tab widget as
+# fzf_default_completion, which must then be fzf-tab-complete. Same gate as fzf in
+# tools.sh: a profile with tools (never minimal, whatever fzf the host has), a
+# terminal on stdin and an fzf on PATH. Vendored, so no download; the
+# optional compiled module is left out and the pure-zsh path is used.
+_df_profile=''
+if [[ -r $HOME/.config/dotfiles/profile ]]; then read -r _df_profile <"$HOME/.config/dotfiles/profile" || :; fi
+case $_df_profile in
+  server | workstation)
+    if [[ -t 0 && -n ${commands[fzf]:-} && -r "$_df_dir/vendor/fzf-tab/fzf-tab.plugin.zsh" ]]; then
+      # shellcheck source=/dev/null
+      source "$_df_dir/vendor/fzf-tab/fzf-tab.plugin.zsh"
+      # Upstream: no zsh menu, so that fzf-tab sees the whole candidate list.
+      zstyle ':completion:*' menu no
+    fi
+    ;;
+esac
+unset _df_profile
 
 # Suggestions from history, vendored so no download is ever needed.
 # shellcheck disable=SC2034

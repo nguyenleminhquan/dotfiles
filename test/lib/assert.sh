@@ -78,3 +78,22 @@ home_hash() {
       sha256sum | cut -d' ' -f1
   )
 }
+
+# zsh_load_order <xtrace>: the order in which ~/.zshrc ran compinit and sourced
+# fzf-tab, zsh-autosuggestions and shell/tools.sh, as one line of names. The
+# input is the output of `zsh -i -x -c exit` (the sourcing steps of ~/.zshrc show
+# up in it as "~/.zshrc:<line>> source <file>"); a step that did not run is missing.
+zsh_load_order() {
+  local name pat
+  {
+    for name in compinit fzf-tab autosuggestions tools; do
+      case "$name" in
+        compinit) pat='\.zshrc:[0-9]+> compinit -C' ;;
+        fzf-tab) pat='\.zshrc:[0-9]+> source .*/vendor/fzf-tab/fzf-tab\.plugin\.zsh( |$)' ;;
+        autosuggestions) pat='\.zshrc:[0-9]+> source .*/zsh-autosuggestions\.zsh( |$)' ;;
+        tools) pat='\.zshrc:[0-9]+> source .*/shell/tools\.sh( |$)' ;;
+      esac
+      printf '%s %s\n' "$(grep -nE -m1 -e "$pat" <<<"$1" | cut -d: -f1)" "$name"
+    done
+  } | grep -v '^ ' | sort -n | cut -d' ' -f2 | tr '\n' ' ' | sed 's/ $//'
+}

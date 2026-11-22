@@ -1,14 +1,14 @@
 # shellcheck shell=bash
 # Interactive tool integration, shared by ~/.bashrc and ~/.zshrc: mise
-# activation, starship (or the pure-shell prompt) and fzf. Defines nothing that
-# stays behind except what the tools' own init scripts define.
+# activation, starship (or the pure-shell prompt), fzf and zoxide. Defines
+# nothing that stays behind except what the tools' own init scripts define.
 #
 # The server and workstation profiles use the tools; minimal never does (a
 # system fzf or starship on a prod host must not change its prompt or keys).
 # Each tool that is missing is skipped, so a half-installed host still works.
 #
-# Startup cost: the init scripts of starship and fzf are cached in
-# ~/.cache/dotfiles/init/, so a shell start reads a file instead of running two
+# Startup cost: the init scripts of starship, fzf and zoxide are cached in
+# ~/.cache/dotfiles/init/, so a shell start reads a file instead of running three
 # programs. mise is the exception: its activation script embeds the current PATH
 # and cannot be cached.
 
@@ -97,6 +97,14 @@ fi
 # stdin: without one the line editor cannot be enabled, the scripts would print
 # warnings, and key bindings are useless anyway (`ssh host zsh -ic cmd`).
 if [[ $_df_use_tools == 1 && -t 0 ]] && _df_init_cache fzf "fzf-$_df_sh" "--$_df_sh"; then
+  # shellcheck source=/dev/null
+  source "$_df_init_file"
+fi
+
+# zoxide: `z` and `zi` (cd is left alone). Last, because its directory hook has
+# to come after the prompt's own. Its data (~/.local/share/zoxide) is the user's,
+# like the shell history: uninstall never removes it.
+if [[ $_df_use_tools == 1 ]] && _df_init_cache zoxide "zoxide-$_df_sh" init "$_df_sh"; then
   # shellcheck source=/dev/null
   source "$_df_init_file"
 fi

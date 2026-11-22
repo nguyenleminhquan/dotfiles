@@ -45,7 +45,7 @@ non-zero, after the install itself is complete.
 | Profile | Installs | Network |
 | --- | --- | --- |
 | `minimal` | shell startup files for bash and zsh (silent and safe for `ssh host cmd`), history that keeps secrets out, a kube-aware prompt, screen and micro settings, git settings, the `dotfiles` command. Meant for production hosts. | never |
-| `server` | everything in `minimal`, plus zsh-bin (only when the host has no zsh 5.8+), [mise](https://mise.jdx.dev) with exactly pinned tools (kubectl, helm, k9s, argocd, jq, yq, ripgrep, step, sops, ... see `config/mise/config.toml`), starship, network helpers (`port`, `certinfo`, `netshoot`) and zsh completions | at install |
+| `server` | everything in `minimal`, plus zsh-bin (only when the host has no zsh 5.8+), [mise](https://mise.jdx.dev) with exactly pinned tools (kubectl, helm, k9s, argocd, jq, yq, ripgrep, step, sops, ... see `config/mise/config.toml`), starship, zoxide, fzf-tab (fzf for zsh Tab completion), network helpers (`port`, `certinfo`, `netshoot`) and zsh completions | at install |
 | `workstation` | everything in `server`, plus opentofu, terragrunt, opencode, python 3.12 with a venv in `~/python-env/ansible2.16`, and WSL tweaks (trimmed Windows PATH, sane umask and locale). Default under WSL. | at install |
 
 Going down a profile (for example back to `minimal`) removes the tools a higher
@@ -70,8 +70,20 @@ dotfiles uninstall --purge --force  # ... even if the checkout holds unsaved wor
 - `--purge` refuses to delete a checkout that is a git clone with uncommitted
   changes, or with commits that exist on no remote and no tag. It says why and
   changes nothing; commit and push, or add `--force` to delete anyway. Backups
-  in `~/.dotfiles-backup/` are always kept, and so is `~/python-env` (the
-  workstation's Python environment): purge never removes either.
+  in `~/.dotfiles-backup/` are always kept, and so are `~/python-env` (the
+  workstation's Python environment) and `~/.local/share/zoxide` (the zoxide
+  database, which belongs to you like the shell history): neither uninstall nor
+  purge removes them.
+- On `server` and `workstation`: `z <dir>` jumps to a directory you visited before
+  and `zi` picks one with fzf ([zoxide](https://github.com/ajeetdsouza/zoxide); `cd`
+  is unchanged). In zsh, Tab completion is [fzf-tab](https://github.com/Aloxaf/fzf-tab)
+  (vendored; `**<Tab>` still opens fzf's own path completion). `minimal` keeps
+  plain zsh completion and has neither.
+- `k` is `kubectl` and completes like it (zsh: after the kubectl completion exists;
+  bash: when `__start_kubectl` is loaded). The install also generates zsh
+  completions for kubectl, helm, k9s, argocd, talosctl, task, mise and, when the
+  host has them, docker, crictl, podman and gh. Put your own `alias k=...` in
+  `~/.zshrc.local` or `~/.bashrc.local` and it wins.
 - Local settings live in files the repo never touches (see
   [Local layer](#local-layer)): `~/.bashrc.local`, `~/.zshrc.local`,
   `~/.gitconfig.local` and `~/.config/dotfiles/env.local`.
