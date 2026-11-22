@@ -35,9 +35,8 @@
 set -euo pipefail
 
 # The repository a piped install (curl ... | bash) fetches when DOTFILES_REPO is
-# not set. TODO: fill in the GitHub URL of this repository, for example
-# https://github.com/<owner>/<repo>, before the first public release.
-DOTFILES_DEFAULT_REPO=""
+# not set.
+DOTFILES_DEFAULT_REPO="https://github.com/nguyenleminhquan/dotfiles"
 
 # Minimal logging for the fetch phase, before lib/log.sh exists (it may not
 # have been downloaded yet). Same format; lib/log.sh replaces these once sourced.

@@ -24,12 +24,11 @@ DOTFILES_SRC="$PWD" ./install.sh --profile server
 With curl:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh | bash -s -- --profile server
+curl -fsSL https://raw.githubusercontent.com/nguyenleminhquan/dotfiles/main/install.sh | bash -s -- --profile server
 ```
 
-`<owner>/<repo>` is the repository named by `DOTFILES_DEFAULT_REPO` at the top
-of `install.sh` (still to be filled in); the piped installer fetches that
-repository. `DOTFILES_REPO=<url>` and `DOTFILES_REF=<branch or tag>` choose
+The piped installer fetches this repository (`DOTFILES_DEFAULT_REPO` at the
+top of `install.sh`). `DOTFILES_REPO=<url>` and `DOTFILES_REF=<branch or tag>` choose
 another one.
 
 `--profile` is saved in `~/.config/dotfiles/profile`, so later runs can leave it
