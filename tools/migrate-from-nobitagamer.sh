@@ -63,7 +63,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --profile)
-      if [ $# -lt 2 ]; then
+      if [ $# -lt 2 ] || [ -z "$2" ]; then
         usage
         printf '[error] --profile needs a value\n' >&2
         exit 1
@@ -73,6 +73,11 @@ while [ $# -gt 0 ]; do
       ;;
     --profile=*)
       profile="${1#--profile=}"
+      if [ -z "$profile" ]; then
+        usage
+        printf '[error] --profile needs a value\n' >&2
+        exit 1
+      fi
       shift
       ;;
     -h | --help)
@@ -325,18 +330,21 @@ collect_links() {
 }
 
 # --- values read from the old shell files ----------------------------------------------------------
-# What an XDG variable means: the environment of this run, else the default.
-declare -A XDG_DIR=(
-  [CONFIG]="${XDG_CONFIG_HOME:-$HOME/.config}" [DATA]="${XDG_DATA_HOME:-$HOME/.local/share}"
-  [CACHE]="${XDG_CACHE_HOME:-$HOME/.cache}" [STATE]="${XDG_STATE_HOME:-$HOME/.local/state}"
-)
+# What an XDG variable means for the old shells: its default under $HOME, never the
+# value in the environment of this run (which the old shells may not have seen).
+declare -A XDG_REL=([CONFIG]=.config [DATA]=.local/share [CACHE]=.cache [STATE]=.local/state)
+declare -A XDG_DIR=()
+for _k in "${!XDG_REL[@]}"; do XDG_DIR[$_k]="$HOME/${XDG_REL[$_k]}"; done
+unset _k
 
 # resolve_value <raw text after "NAME="> [ZDOTDIR]: RESOLVED is the value as an absolute
-# path, computed from the text alone: "…", '…', ~, $HOME, ${HOME}, $XDG_*_HOME (also with
-# a :-default) and, when given, $ZDOTDIR. Anything that would need a shell to evaluate
-# (command substitution, another variable, a relative path, a glob, an operator) gives "".
+# path, computed from the text alone: "…", '…', ~, $HOME, ${HOME}, $XDG_*_HOME (also as
+# ${XDG_*_HOME:-default}, but only when the default is the XDG default itself: any other
+# default depends on the environment) and, when given, $ZDOTDIR. Anything that would need
+# a shell to evaluate (command substitution, another variable, a relative path, a glob, an
+# operator) gives "".
 resolve_value() {
-  local v="$1" m kind
+  local v="$1" m kind def rel
   v="${v%%[[:space:]]\#*}"
   v="${v#"${v%%[![:space:]]*}"}" # trim, so that `"…"  # comment` is left with just the quotes
   v="${v%"${v##*[![:space:]]}"}"
@@ -344,10 +352,15 @@ resolve_value() {
   v="${v%\"}"
   v="${v#\'}"
   v="${v%\'}"
-  while [[ $v =~ \$\{XDG_(CONFIG|DATA|CACHE|STATE)_HOME:-[^}]*\} ]]; do
+  while [[ $v =~ \$\{XDG_(CONFIG|DATA|CACHE|STATE)_HOME:-([^}]*)\} ]]; do
     m="${BASH_REMATCH[0]}"
     kind="${BASH_REMATCH[1]}"
-    v="${v/"$m"/"${XDG_DIR[$kind]}"}"
+    def="${BASH_REMATCH[2]}"
+    rel="${XDG_REL[$kind]}"
+    case "$def" in
+      "\$HOME/$rel" | "\${HOME}/$rel" | "~/$rel") v="${v/"$m"/"${XDG_DIR[$kind]}"}" ;;
+      *) v="${v/"$m"/\$UNRESOLVED}" ;; # left with a "$" so that it is rejected below
+    esac
   done
   for kind in CONFIG DATA CACHE STATE; do
     v="${v//\$\{XDG_${kind}_HOME\}/"${XDG_DIR[$kind]}"}"
@@ -803,6 +816,7 @@ collect_old_reads() {
 
   # Pass 2: the files.
   while IFS= read -r line; do
+    [[ $line =~ ^[[:space:]]*# ]] && continue # a commented-out line reads nothing
     [[ $line =~ $ctx_re ]] || continue
     rest="$line"
     while [[ $rest =~ $tok_re ]]; do
@@ -849,8 +863,10 @@ collect_old_reads() {
 add_local_target() {
   local rel="$1" f="$HOME/$1" kind
   if [ -e "$f" ] || [ -L "$f" ]; then
+    # Like ~/.gitconfig.local and ~/.zsh_history in preflight: a link could lead outside $HOME or
+    # into the old dotfiles (removed before the block is written), so a real file is required.
+    [ ! -L "$f" ] || die "$(disp "$f") is a symlink: move it away first, the migration appends to a real file there"
     [ ! -d "$f" ] || die "$f is a directory: the migration appends a block to it"
-    [ -f "$f" ] || die "$f is a dangling symlink: fix or remove it first"
     [ -w "$f" ] || die "$f is not writable: the migration appends a block to it"
     if grep -qxF -- "$2" "$f"; then kind=present; else kind=append; fi
   else
@@ -898,6 +914,11 @@ plan_gnupg() {
     LOCAL_NOTES+=("GNUPGHOME|no longer read ($why)")
     return 0
   fi
+  # An env.local that sets GNUPGHOME already wins: a second assignment would silently replace it.
+  if grep -qE '^[[:space:]]*(export[[:space:]]+)?GNUPGHOME=' "$HOME/.config/dotfiles/env.local" 2>/dev/null; then
+    LOCAL_NOTES+=("GNUPGHOME|already set in env.local")
+    return 0
+  fi
   LOCAL_NOTES+=("GNUPGHOME|carried to env.local")
   add_local_target .config/dotfiles/env.local "$LOCAL_BEGIN_GPG" "export GNUPGHOME=\"\$HOME/${d#"$HOME"/}\"" "GNUPGHOME=\"\$HOME/${d#"$HOME"/}\""
 }
@@ -916,7 +937,11 @@ plan_local() {
   local var
   for var in HISTFILE XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME; do
     [ -n "${VAR_SEEN["$var"]+x}" ] || continue
-    LOCAL_NOTES+=("$var|no longer read")
+    if [ "$var" = HISTFILE ] && [ -n "$HIST_SRC" ] && [ "${VAR_VAL[HISTFILE]}" = "$HIST_SRC" ]; then
+      LOCAL_NOTES+=("HISTFILE|history migrated to ~/.zsh_history")
+    else
+      LOCAL_NOTES+=("$var|no longer read")
+    fi
   done
 }
 
@@ -1099,23 +1124,45 @@ undo_created() {
 
 # undo_block <path> <block file>: cut the exact block the migration appended out of an
 # existing file (the block file has the text, a leading newline included when the
-# file lacked a final one). A block that was edited is left alone.
+# file lacked a final one). A block that was edited is left alone. It never aborts
+# the rollback: whatever is wrong is a warning and the rest of restore.sh runs.
 undo_block() {
-  local path="$1" blockfile="$2" begin cur blk
+  local path="$1" blockfile="$2" begin="" cur blk pre post
   [ -f "$path" ] || return 0
-  begin="$(grep -m 1 '^# >>> migrated from nobitagamer/dotfiles' "$blockfile")"
+  if [ -L "$path" ]; then
+    warn "$path is a symlink now, leaving it"
+    return 0
+  fi
+  if [ -f "$blockfile" ]; then
+    begin="$(grep -m 1 '^# >>> migrated from nobitagamer/dotfiles' "$blockfile" || true)"
+  fi
+  if [ -z "$begin" ]; then
+    warn "$path: the staged copy of the migration block ($blockfile) is gone, remove the marked lines by hand"
+    return 0
+  fi
   if ! grep -qxF -- "$begin" "$path"; then
     say "$path has no migration block any more"
     return 0
   fi
-  cur="$(cat -- "$path"; printf x)"
+  cur="$(cat -- "$path"; printf x)" || { warn "cannot read $path, leaving it"; return 0; }
   cur="${cur%x}"
-  blk="$(cat -- "$blockfile"; printf x)"
+  blk="$(cat -- "$blockfile"; printf x)" || { warn "cannot read $blockfile, leaving $path"; return 0; }
   blk="${blk%x}"
   case "$cur" in
     *"$blk"*)
-      printf '%s' "${cur/"$blk"/}" >"$path"
-      say "removed the migration block from $path"
+      pre="${cur%%"$blk"*}"
+      post="${cur#*"$blk"}"
+      # The block starts with a newline when the file lacked a final one. If the user added
+      # lines after the block, that newline now separates their last old line from them:
+      # keep it, or the two lines would be joined.
+      if [ "${blk:0:1}" = $'\n' ] && [ -n "$post" ]; then
+        pre="$pre"$'\n'
+      fi
+      if printf '%s%s' "$pre" "$post" >"$path"; then
+        say "removed the migration block from $path"
+      else
+        warn "could not write $path, leaving it as it is"
+      fi
       ;;
     *) warn "$path: the migration block was edited, leaving it as it is (remove the marked lines by hand)" ;;
   esac

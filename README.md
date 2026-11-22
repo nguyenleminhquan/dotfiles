@@ -145,7 +145,8 @@ What happens to the old local layer:
 - **`~/.localrc`.** The old setup created it on the first install and sourced it
   from login bash and interactive zsh. When it exists, a marked block that
   sources it is added to `~/.zshrc.local` and `~/.bashrc.local` (created if
-  missing, appended once otherwise), so interactive shells keep reading it.
+  missing, appended once otherwise; a symlinked target is refused, move it
+  away first), so interactive shells keep reading it.
   `~/.localrc` itself is never touched. Over time, move its entries to the
   file that fits ([Local layer](#local-layer)) and drop the block.
 - **`GNUPGHOME`.** When the old shells export it as a plain path (`$HOME/...`,

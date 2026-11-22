@@ -144,8 +144,21 @@ HIST
 #      keyring, ~/.foo sourced too, HISTFILE set, a pre-existing ~/.zshrc.local
 #      without a final newline
 #   2  no ~/.localrc, GNUPGHOME points at a directory with no keys, ~/.foo sourced
+#   3  GNUPGHOME with an XDG default that is not the XDG default (keys exist there),
+#      HISTFILE is the history that gets migrated, a commented-out source of ~/.commented
 local_layer() {
   local h="$1" o="$1/.dotfiles"
+  if [ "$2" = 3 ]; then
+    printf 'export GNUPGHOME="${XDG_CONFIG_HOME:-$HOME/other}/gnupg"\n' >>"$o/shells/zsh/zshenv"
+    {
+      printf '# source ~/.commented\n'
+      printf 'HISTFILE=$HOME/.config/zsh/.zsh_history\n'
+    } >>"$o/shells/zsh/zshrc"
+    printf 'commented out\n' >"$h/.commented"
+    mkdir -p "$h/other/gnupg/private-keys-v1.d"
+    printf 'fake key\n' >"$h/other/gnupg/private-keys-v1.d/ABCD.key"
+    return 0
+  fi
   printf 'export GNUPGHOME="${XDG_CONFIG_HOME:-$HOME/.config}/gnupg"\n' >>"$o/shells/zsh/zshenv"
   {
     printf '[[ -a $HOME/.foo ]] && source "$HOME/.foo"\n'
@@ -368,6 +381,10 @@ profile_cases() {
     out="$(run_mig "$w" --dry-run)" && _fail "a dry run without --profile on a host that is not WSL should refuse"
     assert_ok "the dry run says to pass --profile" -- grep -qF 'pass --profile' <<<"$out"
   fi
+  out="$(run_mig "$w" --profile=)" && _fail "an empty --profile= should be refused"
+  assert_ok "an empty --profile= is refused with usage" -- grep -qF 'needs a value' <<<"$out"
+  out="$(run_mig "$w" --profile '')" && _fail "an empty --profile value should be refused"
+  assert_ok "an empty --profile value is refused with usage" -- grep -qF 'needs a value' <<<"$out"
   out="$(run_mig "$w" --profile bogus)" && _fail "an unknown profile should be refused"
   assert_ok "an unknown profile is named" -- grep -qF 'unknown profile: bogus' <<<"$out"
   assert_eq "$(tree_hash "$w")" "$w_before" "refusals change nothing"
@@ -758,6 +775,9 @@ for want in "would add the ~/.localrc shim to ~/.zshrc.local (existing file, bac
   assert_ok "local layer dry run says: $want" -- grep -qF -- "$want" <<<"$dry"
 done
 assert_fail "a file that links into the old dotfiles is not reported" -- grep -qF 'git.zsh: ' <<<"$dry"
+# The XDG default the old shells saw is $HOME/.config, not whatever this run's environment says.
+xdg_out="$(cd / && HOME="$l" XDG_CONFIG_HOME="$fx/elsewhere" bash "$mig" --dry-run 2>&1)" || _fail "dry run with XDG_CONFIG_HOME set failed"
+assert_ok "GNUPGHOME is resolved from \$HOME/.config, not from this run's XDG_CONFIG_HOME" -- grep -qF "GNUPGHOME: carried to env.local" <<<"$xdg_out"
 
 rc=0
 out="$(run_mig "$l")" || rc=$?
@@ -837,6 +857,82 @@ assert_eq "$(env HOME="$m" bash -c '. ~/.bashrc; echo "${GNUPGHOME:-unset}"')" u
 (cd / && HOME="$m" bash "$m/.local/bin/dotfiles" uninstall >/dev/null 2>&1) || _fail "dotfiles uninstall failed (nothing to carry)"
 rout="$(cd / && HOME="$m" bash "$bk_m/restore.sh" 2>&1)" || { printf '%s\n' "$rout" >&2; _fail "restore.sh failed (nothing to carry)"; }
 assert_eq "$(tree_hash "$m")" "$m_before" "restored byte for byte (nothing to carry)"
+
+# Rolling back with lines added after the block must not join lines: the original had no
+# final newline, so the migration put a newline in front of its block.
+l5="$fx/l5"
+V_BIG=0 V_LOCAL=1 make_old_home "$l5"
+cp "$l5/.zshrc.local" "$fx/zshrc.local.orig5"
+out="$(run_mig "$l5")" || { printf '%s\n' "$out" >&2; _fail "migrate failed (lines after the block)"; }
+bk_l5="$(backup_of "$l5")"
+printf 'alias mine=true\n' >>"$l5/.zshrc.local"
+(cd / && HOME="$l5" bash "$l5/.local/bin/dotfiles" uninstall >/dev/null 2>&1) || _fail "dotfiles uninstall failed (lines after the block)"
+rout="$(cd / && HOME="$l5" bash "$bk_l5/restore.sh" 2>&1)" || { printf '%s\n' "$rout" >&2; _fail "restore.sh failed (lines after the block)"; }
+assert_eq "$(cat "$l5/.zshrc.local")" "$(
+  cat "$fx/zshrc.local.orig5"
+  printf '\nalias mine=true'
+)" "the block is cut out and the line the user added stays on its own line"
+assert_fail "no two lines were joined" -- grep -q 'truealias' "$l5/.zshrc.local"
+assert_file_absent "$l5/.bashrc.local"
+
+# restore.sh never aborts on a block it cannot cut: it warns and goes on with the rest.
+l4="$fx/l4"
+V_BIG=0 V_LOCAL=1 make_old_home "$l4"
+printf 'alias mine=true\n' >"$l4/.bashrc.local"
+out="$(run_mig "$l4")" || { printf '%s\n' "$out" >&2; _fail "migrate failed (restore resilience)"; }
+bk_l4="$(backup_of "$l4")"
+rm -f "$bk_l4/staged/local-0.block"
+sed -i '/>>> migrated from nobitagamer/d' "$l4/.bashrc.local"
+(cd / && HOME="$l4" bash "$l4/.local/bin/dotfiles" uninstall >/dev/null 2>&1) || _fail "dotfiles uninstall failed (restore resilience)"
+rc=0
+rout="$(cd / && HOME="$l4" bash "$bk_l4/restore.sh" 2>&1)" || rc=$?
+assert_eq "$rc" 0 "restore.sh finishes although a staged block is gone and a marker was removed"
+assert_ok "and warns about the missing staged block" -- grep -qF 'staged copy of the migration block' <<<"$rout"
+assert_ok "and notes the missing marker" -- grep -qF 'has no migration block any more' <<<"$rout"
+assert_ok "the rest of the rollback ran: the old clone is back" -- test -f "$l4/.dotfiles/.dots"
+assert_file_absent "$l4/.config/dotfiles/env.local"
+
+# A symlinked target is refused, like ~/.gitconfig.local, before anything is written (dry run too).
+s1="$fx/s1"
+V_BIG=0 V_LOCAL=1 make_old_home "$s1"
+mv "$s1/.zshrc.local" "$s1.win/data/zshrc.real"
+ln -s "$s1.win/data/zshrc.real" "$s1/.zshrc.local"
+expect_refusal "$s1" '.zshrc.local is a symlink'
+rc=0
+out="$(run_mig "$s1" --dry-run)" || rc=$?
+assert_ok "a dry run refuses the symlinked target too" -- test "$rc" -ne 0
+assert_ok "and says why" -- grep -qF 'is a symlink' <<<"$out"
+s2="$fx/s2"
+V_BIG=0 V_LOCAL=1 make_old_home "$s2"
+rm "$s2/.zshrc.local"
+mklink "$s2" "$s2/.dotfiles/shells/zsh/zshrc" .zshrc.local
+expect_refusal "$s2" '.zshrc.local is a symlink'
+
+# A pre-existing env.local that sets GNUPGHOME is not touched.
+e1="$fx/e1"
+V_BIG=0 V_LOCAL=1 make_old_home "$e1"
+mkdir -p "$e1/.config/dotfiles"
+printf '# mine\nexport GNUPGHOME=/elsewhere/gnupg\n' >"$e1/.config/dotfiles/env.local"
+cp "$e1/.config/dotfiles/env.local" "$fx/env.local.orig"
+e1_before="$(tree_hash "$e1")"
+out="$(run_mig "$e1")" || { printf '%s\n' "$out" >&2; _fail "migrate failed (env.local sets GNUPGHOME)"; }
+bk_e1="$(backup_of "$e1")"
+assert_ok "env.local is byte for byte what it was" -- cmp -s "$e1/.config/dotfiles/env.local" "$fx/env.local.orig"
+assert_ok "the report says GNUPGHOME is set already" -- grep -qF 'GNUPGHOME: already set in env.local' <<<"$out"
+assert_eq "$(env HOME="$e1" bash -c '. ~/.bashrc; echo "G:$GNUPGHOME"')" "G:/elsewhere/gnupg" "the user's own GNUPGHOME still wins"
+(cd / && HOME="$e1" bash "$e1/.local/bin/dotfiles" uninstall >/dev/null 2>&1) || _fail "dotfiles uninstall failed (env.local sets GNUPGHOME)"
+rout="$(cd / && HOME="$e1" bash "$bk_e1/restore.sh" 2>&1)" || { printf '%s\n' "$rout" >&2; _fail "restore.sh failed (env.local sets GNUPGHOME)"; }
+assert_eq "$(tree_hash "$e1")" "$e1_before" "restored byte for byte (env.local sets GNUPGHOME)"
+
+# A GNUPGHOME whose :-default is not the XDG default depends on the environment: not carried, reported.
+# HISTFILE that points at the migrated history is not "no longer read"; a commented-out source reads nothing.
+x="$fx/x"
+V_BIG=0 V_LOCAL=3 make_old_home "$x"
+out="$(run_mig "$x")" || { printf '%s\n' "$out" >&2; _fail "migrate failed (odd GNUPGHOME)"; }
+assert_ok "GNUPGHOME with an odd default is not carried" -- grep -qF 'GNUPGHOME: no longer read' <<<"$out"
+assert_file_absent "$x/.config/dotfiles/env.local"
+assert_ok "HISTFILE that is the migrated history is reported as migrated" -- grep -qF 'HISTFILE: history migrated to ~/.zsh_history' <<<"$out"
+assert_fail "a commented-out source is not reported" -- grep -qF '~/.commented' <<<"$out"
 
 profile_cases
 
