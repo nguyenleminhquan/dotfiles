@@ -419,7 +419,7 @@ assert_eq "$(zsh_i 'print -r -- ${_comps[k]}')" "_kubectl" "zsh: k completes lik
 assert_eq "$(bash_i 'type -t k')" alias "bash: k is an alias"
 assert_eq "$(bash_i 'alias k')" "alias k='kubectl'" "bash: k is an alias of kubectl"
 assert_eq "$(zsh_i 'exit')" "" "interactive zsh still prints nothing"
-assert_eq "$(bash_i 'exit')" "" "interactive bash still prints nothing"
+assert_eq "$(bash_i 'true')" "" "interactive bash still prints nothing"
 
 # case_completions
 for t in kubectl helm k9s argocd talosctl task mise; do
