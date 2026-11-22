@@ -503,7 +503,12 @@ assert_file_absent "$HOME/.cache/dotfiles/init"
 
 # bash: z is zoxide's on a tools profile only; k completes like kubectl once its
 # completion function is there (a file of ~/.bashrc.d, here), and not before.
-bash_probe() { printf '%s\nexit\n' "$1" | PATH="$fx/bin:$PATH" DOTFILES_IN_ZSH=1 TERM=xterm-256color bash -i 2>/dev/null; }
+# The answer is picked out between markers: the Rocky /etc/bashrc prints a
+# terminal title before every prompt.
+bash_probe() {
+  printf 'echo "@@$(%s)@@"\nexit\n' "$1" | PATH="$fx/bin:$PATH" DOTFILES_IN_ZSH=1 TERM=xterm-256color bash -i 2>/dev/null |
+    grep -ao '@@.*@@' | head -n 1 | sed 's/^@@//; s/@@$//'
+}
 if [ "$DF_PROFILE" = minimal ]; then
   assert_eq "$(bash_probe 'type -t z')" "" "minimal bash: no zoxide"
   assert_file_absent "$HOME/.cache/dotfiles/init"
