@@ -63,9 +63,14 @@ DF_DOCTOR_PACKAGES=(git screen curl ssh openssl ping)
 # _df_doctor_start_path: the PATH a login starts with before any shell file runs. pam_env sets
 # it from the PATH= line of /etc/environment for ssh and console logins, so the probe starts
 # there too (the line is parsed, never sourced; one that needs a shell to evaluate, or that
-# is not a plain value, is ignored); otherwise the usual default.
+# is not a plain value, is ignored); otherwise the usual default. On WSL every new process from
+# wsl.exe also gets the Windows PATH appended (unless interop's appendWindowsPath is off), so the
+# entries of the inherited PATH under the Windows mount (/mnt/, as in shell/wsl.sh) follow, in
+# their order, and the startup budget is judged on a PATH as long as a terminal's. Native hosts
+# get the plain value. WSL is read from /proc/version with `read`, which costs no process (the
+# rule of lib/detect.sh: the file names Microsoft).
 _df_doctor_start_path() {
-  local file="${DF_ETC_ENVIRONMENT_FILE:-/etc/environment}" line v=""
+  local file="${DF_ETC_ENVIRONMENT_FILE:-/etc/environment}" line v="" pv="" mnt="${DF_WSL_MNT_PREFIX:-/mnt/}" rest entry
   if [ -r "$file" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
       if [[ $line =~ ^[[:space:]]*(export[[:space:]]+)?PATH=(.*)$ ]]; then v="${BASH_REMATCH[2]}"; fi
@@ -78,7 +83,23 @@ _df_doctor_start_path() {
   case "$v" in
     '' | *'$'* | *'`'* | *'"'* | *"'"* | *[[:space:]]* | *\* | *\;* | *\&* | *\|* | *\(* | *\)* | *\<* | *\>* | *\** | *\?*) v="" ;;
   esac
-  printf '%s' "${v:-/usr/local/bin:/usr/bin:/bin}"
+  v="${v:-/usr/local/bin:/usr/bin:/bin}"
+  if [ -r "${DF_PROC_VERSION_FILE:-/proc/version}" ]; then
+    read -r pv <"${DF_PROC_VERSION_FILE:-/proc/version}" || :
+  fi
+  case "${pv,,}" in
+    *microsoft*)
+      rest="$PATH:"
+      while [ -n "$rest" ]; do
+        entry="${rest%%:*}"
+        rest="${rest#*:}"
+        case "$entry" in
+          "$mnt"*) v="$v:$entry" ;;
+        esac
+      done
+      ;;
+  esac
+  printf '%s' "$v"
 }
 
 # _df_doctor_clean <bash args...>: bash in the environment a bare ssh or cron
@@ -300,7 +321,7 @@ _df_doctor_check_ping() {
 # environment cleared), not one that only this shell's PATH has.
 _df_doctor_check_zsh() {
   local zsh i t0 t1 median hint
-  local -a ms=() limit=() sorted=()
+  local -a ms=() limit=() sorted=() fresh=()
   zsh="$(_df_doctor_clean -lc 'command -v zsh' | tail -n 1)" || zsh=""
   case "$zsh" in
     /*) ;;
@@ -315,9 +336,14 @@ _df_doctor_check_zsh() {
     return 0
   fi
   if command -v timeout >/dev/null 2>&1; then limit=(timeout 30); fi
+  df_detect
+  # On WSL a terminal starts with the Windows PATH appended, which makes the start slower than one
+  # from the caller's PATH; time the start from the fresh session's PATH there (natively the
+  # caller's own environment, as before). env and timeout are found before the PATH changes.
+  if [ "$DF_WSL" != 0 ]; then fresh=(env "PATH=$(_df_doctor_start_path)"); fi
   for i in 1 2 3; do
     t0="${EPOCHREALTIME/[.,]/}"
-    if ! ${limit[@]+"${limit[@]}"} "$zsh" -i -c exit >/dev/null 2>&1 </dev/null; then
+    if ! ${limit[@]+"${limit[@]}"} ${fresh[@]+"${fresh[@]}"} "$zsh" -i -c exit >/dev/null 2>&1 </dev/null; then
       _df_doc_warn "zsh startup: 'zsh -i -c exit' failed"
       return 0
     fi
@@ -331,7 +357,6 @@ _df_doctor_check_zsh() {
     return 0
   fi
   hint=""
-  df_detect
   if [ "$DF_WSL" = 1 ]; then
     hint="; on WSL1 starting a process is slow, and the usual causes are mise activate and ~/.localrc (yours); WSL2 starts processes natively"
   fi

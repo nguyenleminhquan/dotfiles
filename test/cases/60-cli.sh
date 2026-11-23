@@ -249,6 +249,34 @@ assert_fail "on WSL2 there is no WSL hint" -- grep -Eq '^WARN +zsh startup.*(WSL
 printf '#!/bin/sh\nexit 0\n' >"$slowbin/zsh"
 out="$(DF_DOCTOR_ZSH_BUDGET_MS=200 DF_PROC_VERSION_FILE=/src/test/fixtures/proc-version-wsl1 probe_doctor)"
 assert_ok "a fast zsh is OK, on WSL1 too" -- grep -Eq '^OK +zsh startup: [0-9]+ ms \(median of 3\)$' <<<"$out"
+# On WSL every new process from wsl.exe gets the Windows PATH appended to the distribution's, so the
+# fresh session the doctor imitates starts from /etc/environment's PATH plus the inherited entries
+# under /mnt/ (in their order). Natively it is /etc/environment's alone.
+printf 'PATH="/etc/one:/etc/two"\n' >"$fx/etc-path"
+start_path() { ( . /src/lib/doctor.sh; DF_ETC_ENVIRONMENT_FILE="${ETC_FILE:-$fx/etc-path}" _df_doctor_start_path ); }
+inherited="/usr/bin:/mnt/c/Win One/bin:/bin:/mnt/d/tools:/opt/x:/mntx/no:/mnt/c/Win Two"
+assert_eq "$(DF_PROC_VERSION_FILE=/nonexistent PATH="$inherited" start_path)" "/etc/one:/etc/two" "natively the probe PATH is /etc/environment's alone"
+assert_eq "$(DF_PROC_VERSION_FILE=/src/test/fixtures/proc-version-wsl1 PATH="$inherited" start_path)" \
+  "/etc/one:/etc/two:/mnt/c/Win One/bin:/mnt/d/tools:/mnt/c/Win Two" "on WSL1 the inherited /mnt/ entries follow, in order"
+assert_eq "$(DF_PROC_VERSION_FILE="$fx/proc-wsl2" PATH="$inherited" start_path)" \
+  "/etc/one:/etc/two:/mnt/c/Win One/bin:/mnt/d/tools:/mnt/c/Win Two" "and on WSL2, which appends the Windows PATH too"
+assert_eq "$(DF_PROC_VERSION_FILE=/src/test/fixtures/proc-version-wsl1 DF_WSL_MNT_PREFIX=/opt/ PATH="$inherited" start_path)" \
+  "/etc/one:/etc/two:/opt/x" "the mount prefix is the one wsl.sh uses (DF_WSL_MNT_PREFIX)"
+assert_eq "$(DF_PROC_VERSION_FILE=/src/test/fixtures/proc-version-wsl1 PATH=/usr/bin:/bin start_path)" "/etc/one:/etc/two" "on WSL with no /mnt/ entry inherited nothing is added"
+assert_eq "$(ETC_FILE=/nonexistent DF_PROC_VERSION_FILE=/src/test/fixtures/proc-version-wsl1 PATH="$inherited" start_path)" \
+  "/usr/local/bin:/usr/bin:/bin:/mnt/c/Win One/bin:/mnt/d/tools:/mnt/c/Win Two" "the default start PATH gets them too"
+# The zsh startup is timed from that PATH on WSL (a stub zsh writes down the PATH it gets), and
+# natively from the PATH of the caller as before.
+rec="$fx/zsh-path"
+printf '#!/bin/sh\nprintf "%%s" "$PATH" >"%s"\n' "$rec" >"$slowbin/zsh"
+printf 'PATH="/usr/local/bin:/usr/bin:/bin"\n' >"$fx/etc-path"
+out="$(DF_ETC_ENVIRONMENT_FILE="$fx/etc-path" DF_PROC_VERSION_FILE=/src/test/fixtures/proc-version-wsl1 PATH="$PATH:/mnt/c/Win One/bin" probe_doctor)"
+assert_ok "the zsh check ran on WSL" -- grep -Eq '^OK +zsh startup: ' <<<"$out"
+assert_eq "$(cat "$rec")" "/usr/local/bin:/usr/bin:/bin:/mnt/c/Win One/bin" "on WSL zsh is started with the fresh session's PATH, Windows entries included"
+out="$(DF_ETC_ENVIRONMENT_FILE="$fx/etc-path" DF_PROC_VERSION_FILE=/nonexistent PATH="$PATH:/mnt/c/Win One/bin" probe_doctor)"
+assert_ok "the zsh check ran natively" -- grep -Eq '^OK +zsh startup: ' <<<"$out"
+assert_eq "$(cat "$rec")" "$PATH:/mnt/c/Win One/bin" "natively zsh keeps the PATH of the caller"
+rm -f "$rec"
 rm -rf "$slowbin"
 brew_block "$brew" >~/.config/dotfiles/env.local
 rm -f "$brew/bin/zsh"
