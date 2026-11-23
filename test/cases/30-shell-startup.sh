@@ -200,3 +200,39 @@ assert_eq "$(env -i HOME="$fx" PATH=/usr/bin:/bin DOTFILES_DIR=/src bash -lc 'ec
 HOME="$fx" bash "$alt/uninstall.sh" >/dev/null 2>&1
 assert_file_absent "$fx/.config/dotfiles/dir"
 rm -rf "$fx"
+
+# case_path_helper_is_linear: the cost of a PATH edit grows with the length of PATH, not with its
+# square. A terminal on WSL starts with the Windows PATH appended (here 60 entries, 2.8 KB), and
+# WSL1 mode then puts 32 directories in front that a non-interactive shell had appended: 32
+# removals. With the old pattern loop (`${p%%":$d:"*}`) that took 1.2 s in bash and 3.4 s in zsh on
+# the docker host (one cpu); a linear edit takes a few ms.
+fx="$(mktemp -d)"
+: >"$fx/.zshrc"
+path_env() { env -i HOME="$fx" ZDOTDIR="$fx" PATH=/usr/bin:/bin DOTFILES_DIR=/src "$@"; }
+fx_path="$(long_path)"
+fx_dirs="$(many_dirs "$fx")"
+for shell in bash zsh; do
+  command -v "$shell" >/dev/null || continue
+  out="$(path_env DF_FX_PATH="$fx_path" DF_FX_DIRS="$fx_dirs" "$shell" -ic '. /src/shell/env.sh; . /src/test/lib/path-time.sh' 2>/dev/null </dev/null)"
+  assert_eq "$(grep -c '^WRONG' <<<"$out" || true)" 0 "$shell: the edited PATH is the dirs, then the rest in order"
+  # shellcheck disable=SC2086  # the three numbers are separate words
+  median="$(median_ms $(sed -n 's/^ms: *//p' <<<"$out"))"
+  printf '  %s: 32 dirs in front of a %s-byte PATH: %s ms (%s)\n' "$shell" "${#fx_path}" "$median" "$(sed -n 's/^ms: *//p' <<<"$out")" >&2
+  assert_ok "$shell: _df_path_add_list on a long PATH takes ${median} ms, under 100 ms" -- test "${median:-99999}" -lt 100
+done
+rm -rf "$fx"
+
+# case_path_helper: _df_path_add (env.sh) edits PATH the same way in every shell. test/lib/path-cases.sh
+# holds the table (front, back and drop of one directory and of lists, empty entries, glob characters,
+# prefixes, the caller's IFS and noglob state); it runs here in each shell that env.sh supports,
+# non-interactively and in an interactive one (which still has _df_path_add_list).
+shells=(sh bash)
+if command -v dash >/dev/null; then shells+=(dash); fi
+if command -v zsh >/dev/null; then shells+=(zsh); fi
+for shell in "${shells[@]}"; do
+  assert_eq "$(path_env "$shell" -c '. /src/shell/env.sh; . /src/test/lib/path-cases.sh' 2>&1)" "path-cases-done" "$shell: PATH helper cases"
+  assert_eq "$(path_env "$shell" -ic '. /src/shell/env.sh; . /src/test/lib/path-cases.sh' 2>/dev/null </dev/null)" "path-cases-done" "$shell -i: PATH helper cases (also _df_path_add_list)"
+done
+# The helper leaves PATH exported: a child sees what it did.
+assert_eq "$(path_env sh -c '. /src/shell/env.sh; PATH=/usr/bin:/bin; _df_path_add front /opt/x; _df_path_add back /opt/y; /usr/bin/env | grep ^PATH=')" "PATH=/opt/x:/usr/bin:/bin:/opt/y" "the edited PATH is exported"
+rm -rf "$fx"

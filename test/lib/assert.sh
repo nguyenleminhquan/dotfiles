@@ -97,3 +97,30 @@ zsh_load_order() {
     done
   } | grep -v '^ ' | sort -n | cut -d' ' -f2 | tr '\n' ' ' | sed 's/ $//'
 }
+
+# long_path: the PATH a terminal gets on WSL, where the Windows PATH is appended to the
+# distribution's: 54 Windows-style directories (spaces, about 50 bytes each) in front of the
+# system ones, 60 entries and 2.8 KB in all (a real WSL host measured 54 entries, 2.8 KB).
+long_path() {
+  local i out=""
+  for ((i = 1; i <= 54; i++)); do
+    printf -v out '%s/mnt/c/Program Files/Vendor-%02d Software Suite/bin:' "$out" "$i"
+  done
+  printf '%s' "${out}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+}
+
+# many_dirs <root>: 32 tool directories like the ones mise lists for a workstation, as one
+# colon-separated list (the WSL1 cache of the mise environment holds this many).
+many_dirs() {
+  local i out=""
+  for ((i = 1; i <= 32; i++)); do
+    printf -v out '%s%s/.local/share/mise/installs/tool-%02d/1.%d.0/bin' "$out" "$1" "$i" "$i"
+    [ "$i" -eq 32 ] || out+=":"
+  done
+  printf '%s' "$out"
+}
+
+# median_ms <numbers...>: the middle one of an odd count of integers.
+median_ms() {
+  printf '%s\n' "$@" | sort -n | sed -n "$((($# + 1) / 2))p"
+}

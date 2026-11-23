@@ -828,6 +828,52 @@ echo "@@$(wc -c <'"$fxw"'/err | tr -d " ")@@"')" "0" "native bash: source ~/.bas
   assert_file_absent "$cache"
   PV="$wsl1"
 
+  # case_wsl1_long_path: on WSL the terminal's PATH has the Windows entries appended (60 entries,
+  # 2.8 KB here), and a non-interactive shell that ran env.sh before it had appended the 32 cached
+  # dirs. Putting them in front is then 32 removals from a long PATH: with the old pattern loop
+  # that took seconds (zsh -i 3.5 s, bash -i 1.4 s on the docker host with one cpu; a start is
+  # about 0.3 s). The fixture's /mnt/ entries are not filtered (DF_WSL_MNT_PREFIX points
+  # elsewhere), as on a host whose Windows directories are not under /mnt/.
+  many="$(many_dirs "$fxw/many")"
+  lp="$(long_path)"
+  many1="${many%%:*}"
+  many3="$(IFS=: read -r a b c _ <<<"$many"; printf '%s %s %s' "$a" "$b" "$c")"
+  long_env() { ( export PATH="$lp:$HOME/.local/bin:$many" DF_WSL_MNT_PREFIX=/nowhere/; "$@" ); }
+  # start_ms <command...>: milliseconds the command takes under the long environment.
+  start_ms() {
+    local t0
+    t0=$(date +%s%N)
+    long_env "$@" >/dev/null
+    echo $((($(date +%s%N) - t0) / 1000000))
+  }
+  rm -f "$cache"
+  DF_TEST_MISE_DIRS="$many" wb 'true' >/dev/null # the cache now lists the 32 dirs
+  assert_eq "$(sed -n 1p "$cache")" "# df-mise-dirs $many" "the long-path cache holds the 32 dirs"
+  reset_logs
+  assert_eq "$(long_env wb 'IFS=: read -ra p <<<"$PATH"; echo "@@${p[0]} ${p[1]} ${p[2]}@@"; n=0; m=0; for e in "${p[@]}"; do case $e in *Vendor-*) n=$((n + 1)) ;; */installs/tool-*) m=$((m + 1)) ;; esac; done; echo "@@$n $m@@"')" \
+    "$many3
+54 32" "long PATH, bash: the cached dirs are in front, each once, and none of the 54 host entries was lost"
+  assert_eq "$(calls "$fxw/log")" 0 "long PATH, bash: and mise is not called"
+  times=()
+  for _ in 1 2 3; do times+=("$(start_ms wb 'true')"); done
+  median="$(median_ms "${times[@]}")"
+  printf '  bash -i, long PATH, 32 cached dirs: %s ms (%s)\n' "$median" "${times[*]}" >&2
+  assert_ok "bash -i on a long WSL PATH starts in ${median} ms, under 600 ms" -- test "$median" -lt 600
+  if [ "$has_zsh" = 1 ]; then
+    assert_eq "$(long_env wz 'print -r -- ${(j: :)${(s.:.)PATH}[1,3]}; print -r -- ${#${(M)path:#*Vendor-*}} ${#${(M)path:#*/installs/tool-*}}')" \
+      "$many3
+54 32" "long PATH, zsh: the cached dirs are in front, each once, and none of the 54 host entries was lost"
+    times=()
+    for _ in 1 2 3; do times+=("$(start_ms wz exit)"); done
+    median="$(median_ms "${times[@]}")"
+    printf '  zsh -i, long PATH, 32 cached dirs: %s ms (%s)\n' "$median" "${times[*]}" >&2
+    assert_ok "zsh -i on a long WSL PATH starts in ${median} ms, under 1000 ms" -- test "$median" -lt 1000
+    # The first cd into a project drops the cached dirs again (32 more removals in the old code).
+    assert_eq "$(long_env wz "cd $fxw/proj/sub; print -r -- \${#\${(M)path:#*Vendor-*}} \${#\${(M)path:#*/installs/tool-*}} \${+functions[_mise_hook]}")" "54 0 1" "long PATH, zsh: the switch to mise activate takes the cached dirs off and nothing else"
+  fi
+  rm -f "$cache"
+  unset -f long_env start_ms
+
   # case_fzf_tab_gate_without_a_process: the cache of tools.sh decides, not `fzf --zsh`.
   if [ "$has_zsh" = 1 ]; then
     PV=/nonexistent

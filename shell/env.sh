@@ -6,48 +6,141 @@
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 export DOTFILES_DIR
 
-# _df_path_add front|back <dir>: put <dir> on PATH exactly once. "front" also
-# moves an entry that is already there (an interactive shell started from a
-# non-interactive one inherits it at the back).
+# _df_path_add front|back|drop <dir>[:<dir>...]: edit PATH, every directory of the colon-separated
+# list exactly once (empty entries of the list are skipped, a repeated one counts once).
+#   front  puts the list at the front, in its order (the first entry ends up first), and moves an
+#          entry that is already on PATH there (an interactive shell started from a non-interactive
+#          one inherits ours at the back);
+#   back   appends the entries that are missing, in order, and never moves one that is there;
+#   drop   takes every occurrence of the entries off PATH.
+# Entries are compared as whole strings (a glob character or a space in a directory matches only
+# itself, /usr/bin is not /usr/bin2). The other entries of PATH, empty ones too, keep their places.
+#
+# The cost is linear in the length of PATH: PATH is split once, by the shell's own field splitting
+# on ":" (noglob, so a "*" in a directory stays a "*"), and each piece is looked up with `case` on
+# a quoted, hence literal, pattern. The old way, ${p%%":$d:"*} in a loop, matched a pattern as long
+# as the directory at every position of PATH: 32 of those on a WSL PATH of 2.8 KB took 1.2 s in bash
+# and 3.4 s in zsh. Splitting with ${x%%:*} and ${x#*:} is no better in zsh (it re-tests the whole
+# string at every position), which is why the split is a `for` over the expansion. No fork, no
+# output; IFS and noglob are put back as the caller had them (zsh: `emulate -L sh` makes the
+# function use sh's word splitting and restores the options by itself).
 _df_path_add() {
-  case ":$PATH:" in
-    *":$2:"*)
-      [ "$1" = front ] || return 0
-      _df_rest=":$PATH:"
-      while :; do
-        case "$_df_rest" in
-          *":$2:"*) _df_rest="${_df_rest%%":$2:"*}:${_df_rest#*":$2:"}" ;;
-          *) break ;;
-        esac
+  if [ -n "${ZSH_VERSION:-}" ]; then emulate -L sh; fi
+  _df_pa_ifs_set="${IFS+x}"
+  _df_pa_ifs="${IFS-}"
+  case "$-" in
+    *f*) _df_pa_noglob=1 ;;
+    *) _df_pa_noglob= ;;
+  esac
+  set -f
+  IFS=:
+  # _df_pa_set holds the list as ":a:b:" (no empty and no repeated entry), so that a lookup is one
+  # `case` on ":$entry:".
+  _df_pa_set=:
+  _df_pa_last=
+  # shellcheck disable=SC2086  # split on ":" on purpose
+  for _df_pa_e in ${2-}; do
+    if [ -n "$_df_pa_e" ]; then
+      _df_pa_last="$_df_pa_e"
+      case "$_df_pa_set" in
+        *":$_df_pa_e:"*) ;;
+        *) _df_pa_set="$_df_pa_set$_df_pa_e:" ;;
+      esac
+    fi
+  done
+  case "$1" in
+    front | drop)
+      # Does PATH hold any of them? If not, there is nothing to take out.
+      _df_pa_hit=
+      # shellcheck disable=SC2086
+      for _df_pa_e in $_df_pa_set; do
+        if [ -n "$_df_pa_e" ]; then
+          case ":$PATH:" in
+            *":$_df_pa_e:"*)
+              _df_pa_hit=1
+              break
+              ;;
+          esac
+        fi
       done
-      _df_rest="${_df_rest#:}"
-      PATH="${_df_rest%:}"
-      unset _df_rest
+      if [ -n "$_df_pa_hit" ]; then
+        # One pass over PATH. Shells disagree on whether a trailing ":" ends a field list or
+        # starts an empty field, so ":x" is appended and the last field (that "x") is never kept:
+        # each field is judged when the next one arrives.
+        _df_pa_out=
+        _df_pa_p="$PATH:x"
+        _df_pa_n=0
+        _df_pa_ne=0
+        _df_pa_ee=0
+        # shellcheck disable=SC2086
+        for _df_pa_e in $_df_pa_p; do
+          if [ "$_df_pa_n" = 1 ]; then
+            # What a removal of the list's last entry alone would leave: counted for the rule below.
+            if [ -z "$_df_pa_prev" ]; then
+              _df_pa_ee=$((_df_pa_ee + 1))
+            elif [ "$_df_pa_prev" != "$_df_pa_last" ]; then
+              _df_pa_ne=$((_df_pa_ne + 1))
+            fi
+            _df_pa_keep=1
+            if [ -n "$_df_pa_prev" ]; then
+              case "$_df_pa_set" in
+                *":$_df_pa_prev:"*) _df_pa_keep= ;;
+              esac
+            fi
+            if [ -n "$_df_pa_keep" ]; then _df_pa_out="$_df_pa_out$_df_pa_prev:"; fi
+          fi
+          _df_pa_prev="$_df_pa_e"
+          _df_pa_n=1
+        done
+        # A lone empty entry is dropped, as it always was: `drop` leaves ":" alone behind, and
+        # `front` goes entry by entry from the list's end, so the first removal (of its last entry)
+        # is the one that can leave the empty entry alone (later steps keep that entry in PATH).
+        if [ "$1" = front ]; then
+          if [ "$_df_pa_ne" = 0 ] && [ "$_df_pa_ee" = 1 ]; then _df_pa_out=; fi
+        elif [ "$_df_pa_out" = : ]; then
+          _df_pa_out=
+        fi
+      fi
+      _df_pa_front="${_df_pa_set#:}"
+      _df_pa_front="${_df_pa_front%:}"
+      if [ -n "$_df_pa_hit" ]; then
+        # _df_pa_out is "e1:e2:...:" (every entry with its colon), empty when nothing is left;
+        # a lone empty entry is ":" and joins to "" (or to "front:" behind a front list).
+        if [ "$1" = front ]; then
+          if [ -n "$_df_pa_out" ]; then PATH="$_df_pa_front:${_df_pa_out%:}"; else PATH="$_df_pa_front"; fi
+        else
+          PATH="${_df_pa_out%:}"
+        fi
+      elif [ "$1" = front ] && [ -n "$_df_pa_front" ]; then
+        PATH="$_df_pa_front${PATH:+:$PATH}"
+      fi
+      export PATH
+      ;;
+    *)
+      # shellcheck disable=SC2086
+      for _df_pa_e in $_df_pa_set; do
+        if [ -n "$_df_pa_e" ]; then
+          case ":$PATH:" in
+            *":$_df_pa_e:"*) ;;
+            *)
+              PATH="${PATH:+$PATH:}$_df_pa_e"
+              export PATH
+              ;;
+          esac
+        fi
+      done
       ;;
   esac
-  case "$1" in
-    front) PATH="$2${PATH:+:$PATH}" ;;
-    *) PATH="${PATH:+$PATH:}$2" ;;
-  esac
-  export PATH
+  if [ -n "$_df_pa_ifs_set" ]; then IFS="$_df_pa_ifs"; else unset IFS; fi
+  if [ -z "$_df_pa_noglob" ]; then set +f; fi
+  unset _df_pa_ifs_set _df_pa_ifs _df_pa_noglob _df_pa_set _df_pa_e _df_pa_out _df_pa_hit _df_pa_front _df_pa_p _df_pa_n _df_pa_ne _df_pa_ee _df_pa_last _df_pa_prev _df_pa_keep
 }
 
-# _df_path_add_list front|back <a:b:c>: _df_path_add for each directory of a
-# colon-separated list; "front" keeps the list's order (the first entry ends up
-# first), "back" too (the last entry ends up last).
+# _df_path_add_list front|back|drop <a:b:c>: the same call under the name the callers of a list
+# use; "front" keeps the list's order (the first entry ends up first), "back" too (the last entry
+# ends up last).
 _df_path_add_list() {
-  _df_pl="$2"
-  while [ -n "$_df_pl" ]; do
-    if [ "$1" = front ]; then
-      _df_pe="${_df_pl##*:}"
-      case "$_df_pl" in *:*) _df_pl="${_df_pl%:*}" ;; *) _df_pl= ;; esac
-    else
-      _df_pe="${_df_pl%%:*}"
-      case "$_df_pl" in *:*) _df_pl="${_df_pl#*:}" ;; *) _df_pl= ;; esac
-    fi
-    [ -z "$_df_pe" ] || _df_path_add "$1" "$_df_pe"
-  done
-  unset _df_pl _df_pe
+  _df_path_add "$@"
 }
 
 # _df_wsl_detect: set _df_wsl to 0 (not WSL), 1 or 2. /proc/version names

@@ -278,6 +278,46 @@ zsh_i 'for f in $precmd_functions; do $f; done' >/dev/null
 assert_eq "$(n_calls)" 0 "the precmd hooks make zero mise calls"
 assert_eq "$(bash_i 'eval "$PROMPT_COMMAND"')" "" "the PROMPT_COMMAND entries make zero mise calls and print nothing"
 assert_eq "$(n_calls)" 0 "bash: still zero"
+# A terminal on WSL starts with the Windows PATH appended (here 60 entries, 2.8 KB) and a
+# non-interactive shell that ran env.sh has appended the cached dirs already: putting them in front
+# is one removal each from a long PATH, which the old pattern loop did in quadratic time (zsh -i
+# alone took seconds). The fixture's /mnt/ entries are not filtered (DF_WSL_MNT_PREFIX points
+# elsewhere), as on a host whose Windows directories are not under /mnt/.
+cached="$venv/bin:$bin_paths"
+lp="$(long_path)"
+long_env() { ( export PATH="$lp:$HOME/.local/bin:$cached" DF_WSL_MNT_PREFIX=/nowhere/; "$@" ); }
+start_ms() {
+  local t0
+  t0=$(date +%s%N)
+  long_env "$@" >/dev/null
+  echo $((($(date +%s%N) - t0) / 1000000))
+}
+assert_eq "$(long_env zsh_i "print -r -- \${(j.:.)\${(s.:.)PATH}[1,$n_front]} \${#\${(M)path:#*Vendor-*}}")" "$cached 54" "long PATH, zsh: the cached dirs are in front once, none of the 54 host entries lost"
+assert_eq "$(long_env bash_i 'IFS=: read -ra p <<<"$PATH"; echo "${p[0]}"; n=0; for e in "${p[@]}"; do [[ $e == *Vendor-* ]] && n=$((n + 1)); done; echo "$n"')" "$venv/bin
+54" "long PATH, bash: the venv is in front, none of the 54 host entries lost"
+assert_eq "$(n_calls)" 0 "long PATH: still no mise call"
+# Start time against the same start from a plain PATH (a bound relative to this host's speed):
+# the old code added 0.34 s to zsh -i and 0.1 s to bash -i here (the cache holds a handful of dirs;
+# 40-interactive.sh has the 32-dir case), the linear one a few ms.
+declare -A plain_ms=() lp_ms=()
+for kind in zsh bash; do
+  times=()
+  for _ in 1 2 3; do
+    t0=$(date +%s%N)
+    if [ "$kind" = zsh ]; then zsh_i exit >/dev/null; else bash_i true >/dev/null; fi
+    times+=($((($(date +%s%N) - t0) / 1000000)))
+  done
+  plain_ms[$kind]="$(median_ms "${times[@]}")"
+  times=()
+  for _ in 1 2 3; do
+    if [ "$kind" = zsh ]; then times+=("$(start_ms zsh_i exit)"); else times+=("$(start_ms bash_i true)"); fi
+  done
+  lp_ms[$kind]="$(median_ms "${times[@]}")"
+  printf '%s -i: plain PATH %s ms, long WSL PATH %s ms (%s)\n' "$kind" "${plain_ms[$kind]}" "${lp_ms[$kind]}" "${times[*]}" >&2
+done
+assert_ok "zsh -i on a long WSL PATH (${lp_ms[zsh]} ms) is less than 100 ms slower than on a plain one (${plain_ms[zsh]} ms)" -- test "${lp_ms[zsh]}" -lt $((plain_ms[zsh] + 100))
+assert_ok "bash -i on a long WSL PATH (${lp_ms[bash]} ms) is less than 50 ms slower than on a plain one (${plain_ms[bash]} ms)" -- test "${lp_ms[bash]}" -lt $((plain_ms[bash] + 50))
+unset -f long_env start_ms
 # A reload (`source ~/.zshrc`, `source ~/.bashrc`) leaves WSL1 mode as it is: nothing printed, the
 # venv still first and not repeated, not activated, and no mise call.
 assert_eq "$(zsh_i "source ~/.zshrc; print -r -- \${PATH%%:*} \${#\${(M)path:#$venv/bin}} \${+functions[_mise_hook]}")" "$venv/bin 1 0" "zsh: source ~/.zshrc is clean and keeps WSL1 mode"

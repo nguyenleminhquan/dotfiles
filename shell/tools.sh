@@ -96,7 +96,7 @@ _df_mise_in_project() {
 # WSL1 mode is left, and mise's own hooks take over.
 _df_mise_switch() {
   _df_mise_in_project || return 0
-  local exe="$_df_mise_wsl1_bin" rest="$_df_mise_wsl1_dirs" d p sh=bash
+  local exe="$_df_mise_wsl1_bin" sh=bash
   [[ -x $exe ]] || exe="$(command -v mise)"
   [[ -n $exe ]] || return 0
   [[ -n ${ZSH_VERSION:-} ]] && sh=zsh
@@ -106,16 +106,9 @@ _df_mise_switch() {
   else
     _df_mise_prompt_stop
   fi
-  while [[ -n $rest ]]; do
-    d="${rest%%:*}"
-    if [[ $rest == *:* ]]; then rest="${rest#*:}"; else rest=''; fi
-    [[ -n $d ]] || continue
-    p=":$PATH:"
-    while [[ $p == *":$d:"* ]]; do p="${p/":$d:"/:}"; done
-    p="${p#:}"
-    PATH="${p%:}"
-  done
-  export PATH
+  # One linear pass over PATH for all the cached dirs (env.sh's helper; a removal per dir with a
+  # pattern loop took seconds on a long WSL PATH).
+  _df_path_add drop "$_df_mise_wsl1_dirs"
   unset _df_mise_wsl1_bin _df_mise_wsl1_dirs _df_mise_pwd
   unset -f _df_mise_switch _df_mise_in_project
   [[ $sh == bash ]] && unset -f _df_mise_prompt_stop
