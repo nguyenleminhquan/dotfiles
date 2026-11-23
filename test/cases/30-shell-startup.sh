@@ -236,3 +236,43 @@ done
 # The helper leaves PATH exported: a child sees what it did.
 assert_eq "$(path_env sh -c '. /src/shell/env.sh; PATH=/usr/bin:/bin; _df_path_add front /opt/x; _df_path_add back /opt/y; /usr/bin/env | grep ^PATH=')" "PATH=/opt/x:/usr/bin:/bin:/opt/y" "the edited PATH is exported"
 rm -rf "$fx"
+
+# case_wsl_filter_start: a WSL terminal's shell starts with the whole Windows PATH, and the filter of
+# shell/wsl.sh (run by env.sh from ~/.zshenv and ~/.bashrc, so also by `ssh host cmd`) goes through
+# every entry: 54 Windows-style directories here, under a prefix the filter really matches (the other
+# long-PATH tests point it elsewhere). One of them holds explorer.exe and must stay. The start is
+# timed against a start from a PATH without the Windows entries; the real WSL1 host spends tens of ms
+# in the filter, where its split used to be quadratic in zsh.
+fx="$(mktemp -d)"
+wsl1="/src/test/fixtures/proc-version-wsl1"
+keep="$fx/mnt/c/Program Files/Vendor-07 Software Suite/bin"
+mkdir -p "$keep"
+touch "$keep/explorer.exe"
+lp_wsl="$(long_path "$fx/mnt/c")"
+plain_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+wsl_start() { # <shell> <path>: the PATH a non-interactive shell ends with, bash after ~/.bashrc as sshd does
+  local code='echo "$PATH"'
+  [ "$1" != bash ] || code='. ~/.bashrc; echo "$PATH"'
+  env -i HOME="$HOME" PATH="$2" DF_PROC_VERSION_FILE="$wsl1" DF_WSL_MNT_PREFIX="$fx/mnt/" "$1" -c "$code"
+}
+wsl_ms() { # <shell> <path>: median of three starts in ms
+  local t i times=()
+  for i in 1 2 3; do
+    t=$(date +%s%N)
+    wsl_start "$1" "$2" >/dev/null
+    times+=($((($(date +%s%N) - t) / 1000000)))
+  done
+  median_ms "${times[@]}"
+}
+for shell in bash zsh; do
+  command -v "$shell" >/dev/null || continue
+  out="$(wsl_start "$shell" "$lp_wsl")"
+  assert_eq "$(tr ':' '\n' <<<"$out" | grep -c 'Vendor-' || true)" 1 "$shell: the filter dropped 53 of the 54 Windows entries"
+  assert_eq "$(tr ':' '\n' <<<"$out" | grep 'Vendor-')" "$keep" "$shell: and kept the one with explorer.exe"
+  assert_eq "$(tr ':' '\n' <<<"${out%%/usr/local/sbin*}" | grep -c . || true)" 1 "$shell: in its place, in front of the system dirs"
+  plain="$(wsl_ms "$shell" "$plain_path")"
+  long="$(wsl_ms "$shell" "$lp_wsl")"
+  printf '  %s -c, WSL filter on 54 Windows entries: %s ms (plain PATH: %s ms)\n' "$shell" "$long" "$plain" >&2
+  assert_ok "$shell: a start with the filter on a long PATH (${long} ms) is less than 40 ms slower than a plain one (${plain} ms)" -- test "$long" -lt $((plain + 40))
+done
+rm -rf "$fx"

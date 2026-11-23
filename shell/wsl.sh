@@ -14,37 +14,57 @@
 # _df_wsl_filter <path string>: set _df_wf_result to the filtered PATH. No
 # subshell: a shell start pays for no fork here. Entries are split on ":" only,
 # so directories with spaces ("Microsoft VS Code") are fine, and empty entries
-# are kept as they are.
+# are kept as they are. The split is the shell's own field splitting (IFS=:,
+# noglob; IFS and noglob are put back, zsh runs under `emulate -L sh`), not
+# ${x%%:*} / ${x#*:} in a loop, which is quadratic in zsh on a long PATH. Shells
+# disagree on whether a trailing ":" starts an empty field, so ":x" is appended
+# and each field is judged when the next one arrives (the last, "x", never is).
 _df_wsl_filter() {
+  if [ -n "${ZSH_VERSION:-}" ]; then emulate -L sh; fi
+  _df_wf_ifs_set="${IFS+x}"
+  _df_wf_ifs="${IFS-}"
+  case "$-" in
+    *f*) _df_wf_noglob=1 ;;
+    *) _df_wf_noglob= ;;
+  esac
+  set -f
+  IFS=:
   _df_wf_prefix="${DF_WSL_MNT_PREFIX:-/mnt/}"
   _df_wf_result=
   _df_wf_first=1
-  _df_wf_rest="$1:"
-  while [ -n "$_df_wf_rest" ]; do
-    _df_wf_dir="${_df_wf_rest%%:*}"
-    _df_wf_rest="${_df_wf_rest#*:}"
-    _df_wf_keep=1
-    case "$_df_wf_dir" in
-      "$_df_wf_prefix"*)
-        _df_wf_keep=0
-        for _df_wf_f in code explorer.exe clip.exe powershell.exe wsl.exe docker; do
-          if [ -e "$_df_wf_dir/$_df_wf_f" ]; then
-            _df_wf_keep=1
-            break
-          fi
-        done
-        ;;
-    esac
-    if [ "$_df_wf_keep" = 1 ]; then
-      if [ "$_df_wf_first" = 1 ]; then
-        _df_wf_result="$_df_wf_dir"
-        _df_wf_first=0
-      else
-        _df_wf_result="$_df_wf_result:$_df_wf_dir"
+  _df_wf_n=0
+  _df_wf_rest="$1:x"
+  # shellcheck disable=SC2086  # split on ":" on purpose
+  for _df_wf_e in $_df_wf_rest; do
+    if [ "$_df_wf_n" = 1 ]; then
+      _df_wf_dir="$_df_wf_prev"
+      _df_wf_keep=1
+      case "$_df_wf_dir" in
+        "$_df_wf_prefix"*)
+          _df_wf_keep=0
+          for _df_wf_f in code explorer.exe clip.exe powershell.exe wsl.exe docker; do
+            if [ -e "$_df_wf_dir/$_df_wf_f" ]; then
+              _df_wf_keep=1
+              break
+            fi
+          done
+          ;;
+      esac
+      if [ "$_df_wf_keep" = 1 ]; then
+        if [ "$_df_wf_first" = 1 ]; then
+          _df_wf_result="$_df_wf_dir"
+          _df_wf_first=0
+        else
+          _df_wf_result="$_df_wf_result:$_df_wf_dir"
+        fi
       fi
     fi
+    _df_wf_prev="$_df_wf_e"
+    _df_wf_n=1
   done
-  unset _df_wf_prefix _df_wf_first _df_wf_rest _df_wf_dir _df_wf_keep _df_wf_f
+  if [ -n "$_df_wf_ifs_set" ]; then IFS="$_df_wf_ifs"; else unset IFS; fi
+  if [ -z "$_df_wf_noglob" ]; then set +f; fi
+  unset _df_wf_ifs_set _df_wf_ifs _df_wf_noglob _df_wf_prefix _df_wf_first _df_wf_n _df_wf_rest _df_wf_e _df_wf_prev _df_wf_dir _df_wf_keep _df_wf_f
 }
 
 # df_wsl_filter_path <path string>: print the string without the directories

@@ -317,7 +317,29 @@ for kind in zsh bash; do
 done
 assert_ok "zsh -i on a long WSL PATH (${lp_ms[zsh]} ms) is less than 100 ms slower than on a plain one (${plain_ms[zsh]} ms)" -- test "${lp_ms[zsh]}" -lt $((plain_ms[zsh] + 100))
 assert_ok "bash -i on a long WSL PATH (${lp_ms[bash]} ms) is less than 50 ms slower than on a plain one (${plain_ms[bash]} ms)" -- test "${lp_ms[bash]}" -lt $((plain_ms[bash] + 50))
-unset -f long_env start_ms
+# The same with the WSL filter active (a prefix the 54 Windows entries match, one of them holds
+# explorer.exe): shell/wsl.sh goes through the whole PATH first, as on a real terminal.
+fxm="$(mktemp -d)"
+keepd="$fxm/mnt/c/Program Files/Vendor-07 Software Suite/bin"
+mkdir -p "$keepd"
+touch "$keepd/explorer.exe"
+lpf="$(long_path "$fxm/mnt/c")"
+filter_env() { ( export PATH="$lpf:$HOME/.local/bin:$cached" DF_WSL_MNT_PREFIX="$fxm/mnt/"; "$@" ); }
+assert_eq "$(filter_env zsh_i 'print -r -- ${#${(M)path:#*Vendor-*}} ${${(M)path:#*Vendor-*}}')" "1 $keepd" "WSL filter active, zsh: 53 of 54 Windows entries dropped, the one with explorer.exe kept"
+for kind in zsh bash; do
+  times=()
+  for _ in 1 2 3; do
+    t0=$(date +%s%N)
+    if [ "$kind" = zsh ]; then filter_env zsh_i exit >/dev/null; else filter_env bash_i true >/dev/null; fi
+    times+=($((($(date +%s%N) - t0) / 1000000)))
+  done
+  lp_ms[$kind]="$(median_ms "${times[@]}")"
+  printf '%s -i with the WSL filter on 54 Windows entries: %s ms (%s), plain PATH %s ms\n' "$kind" "${lp_ms[$kind]}" "${times[*]}" "${plain_ms[$kind]}" >&2
+done
+assert_ok "zsh -i with the WSL filter on a long PATH (${lp_ms[zsh]} ms) is less than 100 ms slower than on a plain one (${plain_ms[zsh]} ms)" -- test "${lp_ms[zsh]}" -lt $((plain_ms[zsh] + 100))
+assert_ok "bash -i with the WSL filter on a long PATH (${lp_ms[bash]} ms) is less than 50 ms slower than on a plain one (${plain_ms[bash]} ms)" -- test "${lp_ms[bash]}" -lt $((plain_ms[bash] + 50))
+rm -rf "$fxm"
+unset -f long_env start_ms filter_env
 # A reload (`source ~/.zshrc`, `source ~/.bashrc`) leaves WSL1 mode as it is: nothing printed, the
 # venv still first and not repeated, not activated, and no mise call.
 assert_eq "$(zsh_i "source ~/.zshrc; print -r -- \${PATH%%:*} \${#\${(M)path:#$venv/bin}} \${+functions[_mise_hook]}")" "$venv/bin 1 0" "zsh: source ~/.zshrc is clean and keeps WSL1 mode"
