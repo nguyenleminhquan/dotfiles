@@ -1,6 +1,6 @@
 # Status (tạm thời)
 
-File ghi tình hình làm việc, sẽ xoá khi xong đợt này. Cập nhật lần cuối: 2026-11-23 (trưa).
+File ghi tình hình làm việc, sẽ xoá khi xong đợt này. Cập nhật lần cuối: 2026-11-23 (chiều).
 
 ## Đã xong, đã push lên `main`
 
@@ -14,16 +14,17 @@ File ghi tình hình làm việc, sẽ xoá khi xong đợt này. Cập nhật l
 | `b3a9631` | sửa PATH theo thời gian tuyến tính (trước đó chậm theo bình phương độ dài PATH, mất vài giây trên PATH dài của WSL) |
 | `c1266f0` | trên WSL, doctor đo thời gian khởi động với PATH có các entry Windows `/mnt/...` |
 | `0ba8740` | `_df_wsl_filter` tách PATH tuyến tính; test đo khởi động với filter bật |
+| `9edb830` | `dotfiles update` chạy installer từ bản copy trong `~/.cache/dotfiles` (WSL1 không cho đổi tên thư mục đang có file mở); báo lỗi rõ khi đổi tên `~/.dotfiles` thất bại |
 
-Full suite ở `0ba8740`: 114 PASS / 0 FAIL. Mỗi task đều qua review và một vòng sửa.
+Full suite ở `0ba8740` và ở `9edb830`: 114 PASS / 0 FAIL. Mỗi task đều qua review và một vòng sửa.
 
 ## Kết quả đo trên WSL1 (laptop, terminal mới, PATH Windows 2.9 KB)
 
-Đã trừ khoảng 730 ms overhead của `script` (pty) trên WSL1.
+Đã trừ overhead của `script` (pty) trên WSL1, khoảng 730–750 ms tuỳ lúc.
 
-| | Trước đợt sửa (`1075061`) | `a91e244` | Giờ (`0ba8740`) |
+| | Trước đợt sửa (`1075061`) | `a91e244` | Giờ (`9edb830`) |
 |---|---|---|---|
-| `zsh -i` | khoảng 2.3 s | khoảng 5.5 s (lỗi PATH chậm theo bình phương) | **khoảng 650 ms** |
+| `zsh -i` | khoảng 2.3 s | khoảng 5.5 s (lỗi PATH chậm theo bình phương) | **khoảng 650–700 ms** |
 | Số lần gọi mise mỗi lần mở shell / mỗi prompt | 2+ | 0 | 0 |
 | doctor `zsh startup` | — | 1118 ms | 693 ms (WARN, budget 600 ms) |
 
@@ -31,15 +32,14 @@ Trong khoảng 650 ms còn lại, khoảng 100 ms là `~/.localrc` của bạn. 
 
 `bash -i` khoảng 1.6 s, trong đó 1.4 s do `~/.localrc` (xem mục dưới).
 
-## Đang làm: branch `bugfix/update-from-copy`
+## `dotfiles update` trên WSL1: đã sửa và đã thử thật
 
-`dotfiles update` lỗi trên WSL1 khi cài bằng tarball:
-`mv: cannot move ~/.dotfiles ... Permission denied`.
-
-- Nguyên nhân: `bin/dotfiles` chạy `exec bash ~/.dotfiles/install.sh --update`, bash giữ file đó mở trong lúc install.sh đổi tên `~/.dotfiles`. Linux cho phép, WSL1 thì không.
-- Cách sửa: copy install.sh ra `~/.cache/dotfiles/`, chạy bản copy rồi xoá. Khi đổi tên thất bại, báo lỗi rõ ràng (shell đang `cd` trong `~/.dotfiles`, editor đang mở file...).
-- Laptop đã được cập nhật lên `0ba8740` bằng cách chạy installer từ một bản copy (cách tạm thời giống bản sửa).
-- Quy trình: implementer → review → full suite → merge → push → thử `dotfiles update` thật trên WSL.
+- Lỗi cũ: `mv: cannot move ~/.dotfiles ... Permission denied` (bash giữ install.sh mở trong lúc đổi tên `~/.dotfiles`).
+- Đã thử trên laptop ở `9edb830`: `dotfiles update` exit 0, không còn bản copy hay `~/.dotfiles.old.*` nào sót lại.
+- Máy nào còn bản cũ hơn `9edb830` thì lần update đầu tiên vẫn lỗi như trên (vì `bin/dotfiles` cũ vẫn chạy installer ngay trong `~/.dotfiles`). Lần đó cài lại một lần bằng installer tải về:
+  `curl -fsSL https://raw.githubusercontent.com/nguyenleminhquan/dotfiles/main/install.sh -o ~/.cache/df-install.sh && DOTFILES_REPO=https://github.com/nguyenleminhquan/dotfiles bash ~/.cache/df-install.sh; rm -f ~/.cache/df-install.sh`.
+  Từ lần sau `dotfiles update` chạy bình thường.
+- Còn lại (chưa làm): `dotfiles uninstall --purge` cũng xoá `~/.dotfiles` trong lúc đang chạy script nằm trong đó, có thể gặp cùng lỗi trên WSL1. Chưa kiểm chứng.
 
 ## Việc của bạn (không phải repo)
 
