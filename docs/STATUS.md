@@ -1,6 +1,6 @@
 # Status (tạm thời)
 
-File ghi tình hình làm việc, sẽ xoá khi xong đợt này. Cập nhật lần cuối: 2026-11-23.
+File ghi tình hình làm việc, sẽ xoá khi xong đợt này. Cập nhật lần cuối: 2026-11-23 (trưa).
 
 ## Đã xong, đã push lên `main`
 
@@ -11,24 +11,41 @@ File ghi tình hình làm việc, sẽ xoá khi xong đợt này. Cập nhật l
 | `b669ea6` | doctor WARN khi zsh khởi động quá 600 ms |
 | `fcbf9de` | WSL1: không chạy `mise activate` lúc khởi động và mỗi prompt; dùng cache môi trường mise, vào thư mục có `mise.toml` thì chuyển sang activate bình thường. Gate fzf-tab đọc init cache, không chạy fzf |
 | `a91e244` | `source ~/.zshrc` / `~/.bashrc` không lỗi, giữ nguyên chế độ |
+| `b3a9631` | sửa PATH theo thời gian tuyến tính (trước đó chậm theo bình phương độ dài PATH, mất vài giây trên PATH dài của WSL) |
+| `c1266f0` | trên WSL, doctor đo thời gian khởi động với PATH có các entry Windows `/mnt/...` |
+| `0ba8740` | `_df_wsl_filter` tách PATH tuyến tính; test đo khởi động với filter bật |
 
-Full suite ở `a91e244`: 114 PASS / 0 FAIL.
+Full suite ở `0ba8740`: 114 PASS / 0 FAIL. Mỗi task đều qua review và một vòng sửa.
 
-Máy WSL (laptop) đã cài lại từ GitHub (`DOTFILES_REPO=https://github.com/nguyenleminhquan/dotfiles`), nên `dotfiles update` đã có nguồn.
+## Kết quả đo trên WSL1 (laptop, terminal mới, PATH Windows 2.9 KB)
 
-## Đang làm: branch `bugfix/linear-path-edit`
+Đã trừ khoảng 730 ms overhead của `script` (pty) trên WSL1.
 
-Đo trên terminal WSL thật sau khi cài `a91e244`: `zsh -i` khoảng **6.0 s** (trước đó khoảng 3.0 s).
+| | Trước đợt sửa (`1075061`) | `a91e244` | Giờ (`0ba8740`) |
+|---|---|---|---|
+| `zsh -i` | khoảng 2.3 s | khoảng 5.5 s (lỗi PATH chậm theo bình phương) | **khoảng 650 ms** |
+| Số lần gọi mise mỗi lần mở shell / mỗi prompt | 2+ | 0 | 0 |
+| doctor `zsh startup` | — | 1118 ms | 693 ms (WARN, budget 600 ms) |
 
-- Nguyên nhân: `_df_path_add` (shell/env.sh) xoá một entry khỏi PATH bằng `${x%%":$d:"*}` / `${x#*":$d:"}`, chậm theo bình phương độ dài PATH. WSL nối PATH của Windows vào nên PATH dài khoảng 2.8 KB, 54 entry. WSL1 mode đưa 32 thư mục mise lên đầu PATH, mỗi thư mục chạy một lần xoá: zsh mất 4.9 s, bash 1.7 s.
-- Docker test không thấy vì PATH ngắn. Doctor báo 1118 ms vì nó đo session mới với PATH ngắn.
-- Cách sửa: sửa PATH theo thời gian tuyến tính (zsh dùng mảng `path`; bash/sh tách bằng IFS), không fork. Thêm test với PATH dài kiểu WSL. Trên WSL, doctor đo cả các entry `/mnt/...` của Windows.
-- Quy trình: implementer → review → sửa → full suite → merge `main` → push → `dotfiles update` trên WSL → đo lại. Mục tiêu dưới 600 ms.
+Trong khoảng 650 ms còn lại, khoảng 100 ms là `~/.localrc` của bạn. Phần còn lại là compinit, starship, zoxide, fzf (đều đọc từ cache) và chi phí spawn process của WSL1. WSL2 mới giải quyết được triệt để.
+
+`bash -i` khoảng 1.6 s, trong đó 1.4 s do `~/.localrc` (xem mục dưới).
+
+## Đang làm: branch `bugfix/update-from-copy`
+
+`dotfiles update` lỗi trên WSL1 khi cài bằng tarball:
+`mv: cannot move ~/.dotfiles ... Permission denied`.
+
+- Nguyên nhân: `bin/dotfiles` chạy `exec bash ~/.dotfiles/install.sh --update`, bash giữ file đó mở trong lúc install.sh đổi tên `~/.dotfiles`. Linux cho phép, WSL1 thì không.
+- Cách sửa: copy install.sh ra `~/.cache/dotfiles/`, chạy bản copy rồi xoá. Khi đổi tên thất bại, báo lỗi rõ ràng (shell đang `cd` trong `~/.dotfiles`, editor đang mở file...).
+- Laptop đã được cập nhật lên `0ba8740` bằng cách chạy installer từ một bản copy (cách tạm thời giống bản sửa).
+- Quy trình: implementer → review → full suite → merge → push → thử `dotfiles update` thật trên WSL.
 
 ## Việc của bạn (không phải repo)
 
 - `~/.localrc` trên WSL gọi `debug_echo` (không tồn tại), nên bash chạy `command_not_found_handle` (python), tốn khoảng 1.4 s mỗi lần mở bash. Định nghĩa hàm đó hoặc bỏ dòng gọi.
 - Có thể xoá `~/update-dotfiles.sh` trên node đã migrate.
+- Cân nhắc chuyển máy này sang WSL2 (spawn process native, mise activate chỉ khoảng 10 ms).
 
 ## Giới hạn đã biết của WSL1 mode
 
@@ -38,4 +55,4 @@ Máy WSL (laptop) đã cài lại từ GitHub (`DOTFILES_REPO=https://github.com
 
 ## Để sau (chưa duyệt)
 
-GitHub Actions CI, tag release, plugin 5, cùng vài điểm nhỏ còn lại từ review.
+GitHub Actions CI, tag release, plugin 5, cùng vài điểm nhỏ còn lại từ review (ghi trong ledger local).
