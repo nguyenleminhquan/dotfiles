@@ -200,7 +200,12 @@ _swap_in() {
   local old
   old="$(_unique_sibling old)"
   _write_marker "$STAGING"
-  if [ -e "$DOTFILES_DIR" ]; then mv -- "$DOTFILES_DIR" "$old"; fi
+  if [ -e "$DOTFILES_DIR" ] && ! mv -- "$DOTFILES_DIR" "$old"; then
+    # Nothing was moved yet, so there is nothing to roll back. On WSL1 (Windows
+    # file semantics) a directory cannot be renamed while a process has a file
+    # or its working directory inside it.
+    die "could not move $DOTFILES_DIR aside to replace it. A process with a file or its working directory inside it usually causes this (on WSL1: a shell cd-ed there, an editor); close it and run the update again"
+  fi
   if ! mv -- "$STAGING" "$DOTFILES_DIR"; then
     if [ -e "$old" ]; then mv -- "$old" "$DOTFILES_DIR"; fi
     die "could not move the new copy into $DOTFILES_DIR"

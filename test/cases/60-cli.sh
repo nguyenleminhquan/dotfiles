@@ -518,6 +518,86 @@ assert_eq "$(cat "$th/.dotfiles/config/update-probe")" "tar-2" "a failed update 
 assert_eq "$(ls -A "$fx/tmp")" "" "a failed update writes nothing outside HOME"
 assert_fail "a failed update cleans up too" -- compgen -G "$th/.cache/dotfiles-update.*"
 
+# --- case_update_runs_a_private_copy -----------------------------------------------------
+# WSL1 refuses to rename a directory while a process holds a file or its working
+# directory inside it, and bash keeps the running install.sh open. The swap in
+# the tarball update therefore must not run from $DOTFILES_DIR/install.sh. A stub
+# mv stands in for WSL1: it refuses to move the install directory while any
+# process has a file or its cwd inside, and records the command line of the
+# process that asked (the shell running the installer).
+stubs="$fx/stubs"
+mkdir -p "$stubs"
+cat >"$stubs/mv" <<'STUB'
+#!/bin/sh
+# Only the install directory itself is protected, like on WSL1.
+real_dir=''
+for arg in "$@"; do
+  if [ "$arg" = "$STUB_MV_DIR" ] && [ -d "$arg" ]; then real_dir="$(cd "$arg" && pwd -P)"; fi
+done
+if [ -n "$real_dir" ]; then
+  printf '%s\n' "$(tr '\0' ' ' </proc/$PPID/cmdline)" >>"$STUB_MV_LOG"
+  busy=0
+  if [ "$STUB_MV_MODE" = always ]; then busy=1; fi
+  for link in /proc/[0-9]*/fd/* /proc/[0-9]*/cwd; do
+    target="$(readlink "$link" 2>/dev/null || true)"
+    case "$target" in
+      "$real_dir" | "$real_dir"/*) busy=1 ;;
+    esac
+  done
+  if [ "$busy" = 1 ]; then
+    echo "mv: cannot move '$real_dir': Permission denied" >&2
+    exit 1
+  fi
+fi
+PATH="${PATH#"$STUB_MV_PATH":}"
+exec mv "$@"
+STUB
+chmod +x "$stubs/mv"
+# stub_update <mode> [env...]: dotfiles update in the tarball home with the stub mv first on PATH.
+stub_update() {
+  local mode="$1"
+  shift
+  "${isoenv[@]}" HOME="$th" TMPDIR="$fx/tmp" PATH="$stubs:$PATH" STUB_MV_PATH="$stubs" STUB_MV_DIR="$th/.dotfiles" \
+    STUB_MV_MODE="$mode" STUB_MV_LOG="$fx/mv.log" "$@" "$th/.local/bin/dotfiles" update
+}
+
+# The tarball install again (the uninstall below needs it).
+mkpack tar-3
+: >"$fx/mv.log"
+out="$(stub_update open 2>&1)" || _fail "update with the swap refused for a file held open in the install directory failed: $out"
+assert_eq "$(cat "$th/.dotfiles/config/update-probe")" "tar-3" "update swapped the new code in"
+assert_eq "$(wc -l <"$fx/mv.log" | tr -d ' ')" 1 "the stub saw exactly one move of the install directory"
+assert_ok "the installer ran from a private copy under ~/.cache/dotfiles" -- grep -q "^bash $th/.cache/dotfiles/" "$fx/mv.log"
+assert_fail "and not from the install directory" -- grep -q "$th/.dotfiles/install.sh" "$fx/mv.log"
+assert_fail "the copy is removed again" -- compgen -G "$th/.cache/dotfiles/install.*"
+assert_eq "$(ls -A "$fx/tmp")" "" "the copy is not written outside HOME"
+assert_eq "$("$th/.local/bin/dotfiles" profile)" "$DF_PROFILE" "update through a copy keeps the profile"
+
+# A process with its working directory in the install directory (a shell cd-ed
+# there): the rename is refused, the message says why, the install stays as it was.
+mkpack tar-4
+(cd "$th/.dotfiles" && exec sleep 120) &
+holder=$!
+out="$(stub_update open 2>&1)" && _fail "update succeeded although a process holds the install directory"
+assert_ok "the refusal names the cause and the way out" -- \
+  grep -q 'working directory.*close it and run the update again' <<<"$out"
+assert_ok "the refusal names the install directory" -- grep -qF "$th/.dotfiles" <<<"$out"
+assert_eq "$(cat "$th/.dotfiles/config/update-probe")" "tar-3" "a refused update leaves the install alone"
+assert_ok "and the install is still usable" -- test -f "$th/.dotfiles/install.sh"
+assert_fail "and no copy is left behind" -- compgen -G "$th/.cache/dotfiles/install.*"
+assert_fail "and no staging directory is left behind" -- compgen -G "$th/.dotfiles.staging.*"
+assert_fail "nor an aside copy" -- compgen -G "$th/.dotfiles.old.*"
+kill "$holder" 2>/dev/null || true
+wait "$holder" 2>/dev/null || true
+out="$(stub_update open 2>&1)" || _fail "update after the holder exited failed: $out"
+assert_eq "$(cat "$th/.dotfiles/config/update-probe")" "tar-4" "the update goes through once nothing holds the directory"
+
+# DOTFILES_SRC naming the install directory itself is the in-place path: no swap,
+# so nothing is moved and nothing needs a copy.
+: >"$fx/mv.log"
+stub_update always DOTFILES_SRC="$th/.dotfiles" >/dev/null 2>&1 || _fail "update with DOTFILES_SRC=\$DOTFILES_DIR failed"
+assert_eq "$(wc -c <"$fx/mv.log" | tr -d ' ')" 0 "update from the install directory itself moves nothing"
+
 # --- case_uninstall ------------------------------------------------------------------------
 "${isoenv[@]}" HOME="$th" "$th/.local/bin/dotfiles" uninstall --purge >/dev/null 2>&1 || _fail "dotfiles uninstall --purge failed"
 assert_file_absent "$th/.dotfiles"

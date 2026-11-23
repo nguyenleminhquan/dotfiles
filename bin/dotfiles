@@ -68,7 +68,51 @@ cmd_update() {
     die "nothing to update from: $DOTFILES_DIR is not a git clone and no repo was recorded; set DOTFILES_SRC to a local checkout, or install with DOTFILES_REPO"
   fi
   [ -f "$DOTFILES_DIR/install.sh" ] || die "install.sh not found in $DOTFILES_DIR"
-  exec bash "$DOTFILES_DIR/install.sh" --update --profile "$profile" "$@"
+  run_installer_copy --update --profile "$profile" "$@"
+}
+
+# The copy run_installer_copy made, removed by its EXIT trap until the
+# supervisor takes over.
+installer_copy=''
+_remove_installer_copy() {
+  [ -z "$installer_copy" ] || rm -f -- "$installer_copy"
+}
+
+# run_installer_copy <install.sh args>: run $DOTFILES_DIR/install.sh from a
+# private copy under $HOME and exit with its status. An update replaces
+# $DOTFILES_DIR by renaming it, and bash keeps the script it runs open: Linux
+# does not mind, but WSL1 refuses to rename a directory that holds an open
+# file (EACCES). That goes for this script too (it is bin/dotfiles in
+# $DOTFILES_DIR), so it cannot wait for the installer: it execs a supervisor
+# given as a string, which holds no file open, and the supervisor runs the copy
+# and deletes it on every way out, INT and TERM included. The copy also means
+# the code being replaced is never the code being read. It has no lib/ beside
+# it, so install.sh neither takes it for the checkout nor mirrors from it: it
+# resolves the location from DOTFILES_DIR, which df_resolve_dir exported.
+# Never /tmp, never outside $HOME.
+run_installer_copy() {
+  local cache="$HOME/.cache/dotfiles" made=0
+  if [ ! -d "$cache" ]; then made=1; fi
+  mkdir -p "$cache" || die "cannot create $cache for a private copy of install.sh"
+  installer_copy="$(mktemp "$cache/install.XXXXXX")" || die "cannot create a private copy of install.sh in $cache"
+  trap _remove_installer_copy EXIT
+  cp -- "$DOTFILES_DIR/install.sh" "$installer_copy" || die "cannot copy $DOTFILES_DIR/install.sh to $installer_copy"
+  # SC2016: the supervisor is meant to be expanded by the shell it starts.
+  # shellcheck disable=SC2016
+  exec bash -c '
+    copy=$1 made=$2
+    shift 2
+    cleanup() {
+      rm -f -- "$copy"
+      if [ "$made" = 1 ]; then rmdir "${copy%/*}" 2>/dev/null || :; fi
+    }
+    trap cleanup EXIT
+    trap "exit 130" INT
+    trap "exit 143" TERM
+    rc=0
+    bash "$copy" "$@" || rc=$?
+    exit "$rc"
+  ' dotfiles-update "$installer_copy" "$made" "$@"
 }
 
 cmd_doctor() {
