@@ -18,8 +18,13 @@ change the tag and commit above.
 ## fzf-tab
 
 - Upstream: https://github.com/Aloxaf/fzf-tab
-- Tag: `v1.3.0`
-- Commit: `d7e0234614dbe5369fdd760907d12c0e05a4dccc`
+- Version: `master` at commit `24105b15714bfec37989ed5c5b6e60f572253019`, three commits
+  after the `v1.3.0` tag. Taken for upstream's e394092, which drops the
+  `dd bs=1G ... < /dev/tty` read of the keys typed before fzf shows up: that 1 GiB
+  allocation took 1 to 3.5 s on every Tab on WSL1. fzf handles those keys itself since
+  0.60.1 (junegunn/fzf#2455); the pinned fzf is newer, but a host fzf from 0.48 to 0.60.0
+  (accepted by the gate in `shell/zshrc`) may pick the wrong candidate when keys are
+  typed before the list appears. Go back to a tag once one includes e394092.
 - License: MIT (see `fzf-tab/LICENSE`; `fzf-tab/lib/zsh-ls-colors/LICENSE` covers the
   bundled ls-colors parser)
 - Files kept: `fzf-tab.plugin.zsh`, `fzf-tab.zsh`, `LICENSE`, `README.md`, and in `lib/`
@@ -33,5 +38,5 @@ change the tag and commit above.
 - Loaded by `shell/zshrc` on the `server` and `workstation` profiles only, after `compinit`
   and before zsh-autosuggestions.
 
-To update, check out the new tag upstream, copy the same files, and change the tag and
-commit above.
+To update, check out the new tag upstream, copy the same files, and change the version
+above.
