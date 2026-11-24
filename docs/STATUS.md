@@ -15,8 +15,11 @@ File ghi tình hình làm việc, sẽ xoá khi xong đợt này. Cập nhật l
 | `c1266f0` | trên WSL, doctor đo thời gian khởi động với PATH có các entry Windows `/mnt/...` |
 | `0ba8740` | `_df_wsl_filter` tách PATH tuyến tính; test đo khởi động với filter bật |
 | `9edb830` | `dotfiles update` chạy installer từ bản copy trong `~/.cache/dotfiles` (WSL1 không cho đổi tên thư mục đang có file mở); báo lỗi rõ khi đổi tên `~/.dotfiles` thất bại |
+| `b61a3c8` | fzf-tab lấy từ upstream master `24105b1` (sau tag v1.3.0 ba commit): bỏ lệnh `dd bs=1G` đọc phím gõ trước, lệnh này mất 1–3.5 s mỗi lần Tab trên WSL1 |
 
 Full suite ở `0ba8740` và ở `9edb830`: 114 PASS / 0 FAIL. Mỗi task đều qua review và một vòng sửa.
+
+`b61a3c8` chỉ đổi file vendor, chưa chạy test docker (host test không kết nối được); đã đo trên WSL1 như bên dưới.
 
 ## Kết quả đo trên WSL1 (laptop, terminal mới, PATH Windows 2.9 KB)
 
@@ -27,6 +30,7 @@ Full suite ở `0ba8740` và ở `9edb830`: 114 PASS / 0 FAIL. Mỗi task đều
 | `zsh -i` | khoảng 2.3 s | khoảng 5.5 s (lỗi PATH chậm theo bình phương) | **khoảng 650–700 ms** |
 | Số lần gọi mise mỗi lần mở shell / mỗi prompt | 2+ | 0 | 0 |
 | doctor `zsh startup` | — | 1118 ms | 693 ms (WARN, budget 600 ms) |
+| Tab mở danh sách (`ar<Tab>`, fzf-tab) | — | — | khoảng 3.8 s; **khoảng 0.5–0.7 s** từ `b61a3c8` |
 
 Trong khoảng 650 ms còn lại, khoảng 100 ms là `~/.localrc` của bạn. Phần còn lại là compinit, starship, zoxide, fzf (đều đọc từ cache) và chi phí spawn process của WSL1. WSL2 mới giải quyết được triệt để.
 
