@@ -376,8 +376,9 @@ load_libs() {
   . "$1/lib/tools.sh"
 }
 
-# preflight: platform check and profile choice. Sets $profile. Runs before
-# anything is written, so a rejected run leaves no trace.
+# preflight: platform check and profile choice. Sets $profile. Runs with the
+# code that is about to be installed: before anything is written when that code
+# is a local checkout, after the download when it comes from a repo.
 preflight() {
   df_detect
   df_platform_supported || exit 1
@@ -403,8 +404,11 @@ for candidate in "$self_dir" "${DOTFILES_SRC:-}"; do
     break
   fi
 done
-# An installed copy is only trusted when this installer created it.
-if [ -z "$boot_lib" ] && [ -f "$DOTFILES_DIR/$DF_MARKER" ] && [ -f "$DOTFILES_DIR/lib/link.sh" ]; then
+# An installed copy stands in only for a dry run (which downloads nothing), and
+# only when this installer created it. A real run replaces that copy, and its
+# checks can be older than the code being installed: a copy left by a rejected
+# piped install would otherwise keep rejecting a platform the new code supports.
+if [ -z "$boot_lib" ] && [ "$dry_run" = 1 ] && [ -f "$DOTFILES_DIR/$DF_MARKER" ] && [ -f "$DOTFILES_DIR/lib/link.sh" ]; then
   boot_lib="$DOTFILES_DIR"
 fi
 if [ -n "$boot_lib" ]; then

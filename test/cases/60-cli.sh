@@ -518,6 +518,23 @@ assert_eq "$(cat "$th/.dotfiles/config/update-probe")" "tar-2" "a failed update 
 assert_eq "$(ls -A "$fx/tmp")" "" "a failed update writes nothing outside HOME"
 assert_fail "a failed update cleans up too" -- compgen -G "$th/.cache/dotfiles-update.*"
 
+# --- case_piped_install_over_a_stale_copy ------------------------------------------------
+# A rejected piped install leaves its download in ~/.dotfiles. The next piped
+# run must check the platform with the code it downloads, not with that older
+# copy: a Debian 12 host kept being rejected by a copy from before Debian support.
+mkpack piped-1
+ph="$fx/piped-home"
+mkdir -p "$ph/.dotfiles"
+cp -a /src/. "$ph/.dotfiles/"
+rm -rf "$ph/.dotfiles/.git"
+: >"$ph/.dotfiles/.dotfiles-managed"
+printf '\ndf_platform_supported() { log_error "stale copy rejects"; return 1; }\n' >>"$ph/.dotfiles/lib/detect.sh"
+out="$("${isoenv[@]}" HOME="$ph" DOTFILES_REPO="file://$srv" DOTFILES_REF=main bash -s -- --profile "$DF_PROFILE" </src/install.sh 2>&1)" ||
+  _fail "piped install over a stale copy failed: $out"
+assert_fail "the stale copy did not decide the platform" -- grep -q 'stale copy rejects' <<<"$out"
+assert_eq "$(cat "$ph/.dotfiles/config/update-probe")" "piped-1" "the piped install replaced the stale copy"
+assert_eq "$("$ph/.local/bin/dotfiles" profile)" "$DF_PROFILE" "the piped install saved the profile"
+
 # --- case_update_runs_a_private_copy -----------------------------------------------------
 # WSL1 refuses to rename a directory while a process holds a file or its working
 # directory inside it, and bash keeps the running install.sh open. The swap in
