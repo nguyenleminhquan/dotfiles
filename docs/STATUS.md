@@ -1,6 +1,6 @@
 # Status (tạm thời)
 
-File ghi tình hình làm việc, sẽ xoá khi xong đợt này. Cập nhật lần cuối: 2026-11-23 (chiều).
+File ghi tình hình làm việc, sẽ xoá khi xong đợt này. Cập nhật lần cuối: 2026-11-28.
 
 ## Đã xong, đã push lên `main`
 
@@ -34,7 +34,7 @@ Full suite ở `0ba8740` và ở `9edb830`: 114 PASS / 0 FAIL. Mỗi task đều
 
 Trong khoảng 650 ms còn lại, khoảng 100 ms là `~/.localrc` của bạn. Phần còn lại là compinit, starship, zoxide, fzf (đều đọc từ cache) và chi phí spawn process của WSL1. WSL2 mới giải quyết được triệt để.
 
-`bash -i` khoảng 1.6 s, trong đó 1.4 s do `~/.localrc` (xem mục dưới).
+`bash -i` khoảng 1.6 s khi đo, trong đó 1.4 s do `~/.localrc` gọi `debug_echo` (không tồn tại). Bạn đã bỏ dòng gọi đó (2026-11-28), chưa đo lại.
 
 ## `dotfiles update` trên WSL1: đã sửa và đã thử thật
 
@@ -47,7 +47,6 @@ Trong khoảng 650 ms còn lại, khoảng 100 ms là `~/.localrc` của bạn. 
 
 ## Việc của bạn (không phải repo)
 
-- `~/.localrc` trên WSL gọi `debug_echo` (không tồn tại), nên bash chạy `command_not_found_handle` (python), tốn khoảng 1.4 s mỗi lần mở bash. Định nghĩa hàm đó hoặc bỏ dòng gọi.
 - Có thể xoá `~/update-dotfiles.sh` trên node đã migrate.
 - Cân nhắc chuyển máy này sang WSL2 (spawn process native, mise activate chỉ khoảng 10 ms).
 
