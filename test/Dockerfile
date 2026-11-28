@@ -17,6 +17,8 @@ RUN set -eu; \
       apt-get update; \
       apt-get install -y --no-install-recommends \
         curl ca-certificates bsdutils procps locales $extra; \
+      # Debian's locale-gen ignores its arguments and builds what /etc/locale.gen enables.
+      if [ -f /etc/locale.gen ]; then sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen; fi; \
       locale-gen en_US.UTF-8; \
       rm -rf /var/lib/apt/lists/*; \
     else \

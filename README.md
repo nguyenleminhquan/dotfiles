@@ -1,7 +1,7 @@
 # dotfiles
 
-Shell setup for bash and zsh on Ubuntu 20.04, 22.04 and 24.04, Rocky Linux 9
-and WSL1. User scope only: everything lives under `$HOME`, nothing needs sudo,
+Shell setup for bash and zsh on Ubuntu 20.04, 22.04 and 24.04, Debian 12 and
+13, Rocky Linux 9 and WSL1. User scope only: everything lives under `$HOME`, nothing needs sudo,
 and the `minimal` profile never touches the network.
 
 ## Install
@@ -250,7 +250,8 @@ pwsh test/run.ps1 -ListRows          # print the row names (JSON), no docker nee
 ```
 
 Each `test/cases/<case>.sh` runs once per matrix row (Ubuntu 20.04 with and
-without zsh, 22.04, 24.04 without git, Rocky 9, and a WSL1 stand-in) and profile,
+without zsh, 22.04, 24.04 without git, Debian 12 and 13, Rocky 9, and a WSL1
+stand-in) and profile,
 and prints a `row | profile | case | result` table. The exit code is 1 if any row
 fails. Set `GITHUB_TOKEN` in the environment to raise the GitHub API limit for
 the tool downloads; it is passed into the container and never printed.

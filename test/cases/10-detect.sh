@@ -16,6 +16,8 @@ case "$DF_ROW" in
   u22)   assert_eq "$DF_OS_ID $DF_OS_VERSION" "ubuntu 22.04" "real os ($DF_ROW)"; assert_eq "$DF_GLIBC" "2.35" "real glibc ($DF_ROW)" ;;
   u24-*) assert_eq "$DF_OS_ID $DF_OS_VERSION" "ubuntu 24.04" "real os ($DF_ROW)"; assert_eq "$DF_GLIBC" "2.39" "real glibc ($DF_ROW)" ;;
   r9)    assert_eq "$DF_OS_ID" "rocky" "real os ($DF_ROW)"; assert_eq "${DF_OS_VERSION%%.*}" "9" "real rocky major ($DF_ROW)"; assert_eq "$DF_GLIBC" "2.34" "real glibc ($DF_ROW)" ;;
+  d12)   assert_eq "$DF_OS_ID $DF_OS_VERSION" "debian 12" "real os ($DF_ROW)"; assert_eq "$DF_GLIBC" "2.36" "real glibc ($DF_ROW)" ;;
+  d13)   assert_eq "$DF_OS_ID $DF_OS_VERSION" "debian 13" "real os ($DF_ROW)"; assert_eq "$DF_GLIBC" "2.41" "real glibc ($DF_ROW)" ;;
 esac
 
 # WSL detection from /proc/version fixtures.
@@ -57,11 +59,28 @@ printf 'ID=ubuntu\nVERSION_ID="23.10"\n' >"$fx/osr"
 DF_OS_RELEASE_FILE="$fx/osr" df_detect
 assert_fail "ubuntu 23.10 rejected" -- df_platform_supported
 
-# ID_LIKE must not make a derivative count as ubuntu or rocky.
-printf 'ID=debian\nID_LIKE=ubuntu\nVERSION_ID="12"\n' >"$fx/osr"
+for v in 12 13; do
+  printf 'PRETTY_NAME="Debian GNU/Linux %s"\nID=debian\nVERSION_ID="%s"\n' "$v" "$v" >"$fx/osr"
+  DF_OS_RELEASE_FILE="$fx/osr" df_detect
+  assert_eq "$DF_OS_ID $DF_OS_VERSION" "debian $v" "debian $v parsed"
+  assert_ok "debian $v supported" -- df_platform_supported
+done
+
+printf 'ID=debian\nVERSION_ID="11"\n' >"$fx/osr"
 DF_OS_RELEASE_FILE="$fx/osr" df_detect
-assert_eq "$DF_OS_ID" "unknown" "debian is unknown"
-assert_fail "debian rejected" -- df_platform_supported
+assert_fail "debian 11 rejected" -- df_platform_supported
+
+# testing and sid have no VERSION_ID
+printf 'PRETTY_NAME="Debian GNU/Linux forky/sid"\nID=debian\n' >"$fx/osr"
+DF_OS_RELEASE_FILE="$fx/osr" df_detect
+assert_eq "$DF_OS_ID $DF_OS_VERSION" "debian " "debian sid parsed without a version"
+assert_fail "debian sid rejected" -- df_platform_supported
+
+# ID_LIKE must not make a derivative count as a supported distro.
+printf 'ID=raspbian\nID_LIKE=debian\nVERSION_ID="12"\n' >"$fx/osr"
+DF_OS_RELEASE_FILE="$fx/osr" df_detect
+assert_eq "$DF_OS_ID" "unknown" "raspbian is unknown"
+assert_fail "raspbian rejected" -- df_platform_supported
 
 DF_OS_RELEASE_FILE="$fx/missing" df_detect
 assert_eq "$DF_OS_ID" "unknown" "missing os-release is unknown"

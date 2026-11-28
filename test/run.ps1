@@ -35,6 +35,8 @@ $rows = @(
     @{ Name = 'u20-nozsh'; Base = 'ubuntu:20.04';    Zsh = 0; Git = 1 }
     @{ Name = 'u22';       Base = 'ubuntu:22.04';    Zsh = 1; Git = 1 }
     @{ Name = 'u24-nogit'; Base = 'ubuntu:24.04';    Zsh = 1; Git = 0 }
+    @{ Name = 'd12';       Base = 'debian:12';       Zsh = 1; Git = 1 }
+    @{ Name = 'd13';       Base = 'debian:13';       Zsh = 1; Git = 1 }
     @{ Name = 'r9';        Base = 'rockylinux:9';    Zsh = 1; Git = 1 }
     @{ Name = 'u20-ws';    Base = 'ubuntu:20.04';    Zsh = 1; Git = 1
        Profiles = @('workstation'); Cases = '^(00|60|70|80)-'
