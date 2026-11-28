@@ -1,16 +1,20 @@
 # Runs test cases in throwaway containers: one image per matrix row, one
 # container per (row, profile, case), strictly sequential.
 #
-#   pwsh test/run.ps1 [-Context <name>] [-Only <regex>] [-KeepImages]
+#   pwsh test/run.ps1 [-Context <name>] [-Only <regex>] [-Row <regex>] [-KeepImages]
+#   pwsh test/run.ps1 -ListRows
 #
 # The docker context comes from -Context or $env:DOTFILES_TEST_CONTEXT. The
 # repo is baked into the image (COPY . /src) because a remote context cannot
-# bind-mount local paths.
+# bind-mount local paths. -ListRows prints the row names as a JSON array (the
+# CI matrix is built from it) and touches no docker host.
 [CmdletBinding()]
 param(
     [string]$Context = $env:DOTFILES_TEST_CONTEXT,
     [string]$Only = '',
-    [switch]$KeepImages
+    [Alias('Row')][string]$RowPattern = '',
+    [switch]$KeepImages,
+    [switch]$ListRows
 )
 
 Set-StrictMode -Version Latest
@@ -37,6 +41,17 @@ $rows = @(
        Env = @{ DF_PROC_VERSION_FILE = '/src/test/fixtures/proc-version-wsl1' } }
 )
 $defaultProfiles = @('minimal', 'server')
+
+if ($ListRows) {
+    ConvertTo-Json -Compress -InputObject @($rows | ForEach-Object { $_.Name })
+    exit 0
+}
+
+$rows = @($rows | Where-Object { $_.Name -match $RowPattern })
+if ($rows.Count -eq 0) {
+    Write-Error "No matrix rows match -Row '$RowPattern'."
+    exit 1
+}
 
 function Invoke-Docker {
     # Runs docker against the chosen context; returns exit code and output lines.

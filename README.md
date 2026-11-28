@@ -230,15 +230,23 @@ source yet. Set `DOTFILES_REPO=<repo url>` when running the migration (or run
 
 ## Tests
 
-Tests run in throwaway containers on a docker host chosen through the
+The full matrix runs on GitHub Actions (`.github/workflows/test.yml`) for every
+push to `main` and every pull request, one job per matrix row. Run it by hand
+from the Actions tab (`workflow_dispatch`).
+
+Locally, tests run in throwaway containers on a docker host chosen through the
 `DOTFILES_TEST_CONTEXT` environment variable (a context whose name contains
-`prod` is refused). Run them from PowerShell 7:
+`prod` is refused), for example Docker Desktop on your own machine. Do not point
+it at a shared host: the server-profile cases unpack about 1.2 GB of tools per
+container. Run them from PowerShell 7:
 
 ```powershell
-$env:DOTFILES_TEST_CONTEXT = '<context-name>'
+$env:DOTFILES_TEST_CONTEXT = 'desktop-linux'
 pwsh test/run.ps1                    # full matrix (about half an hour)
 pwsh test/run.ps1 -Only 20-install   # cases whose name matches a regex
+pwsh test/run.ps1 -Row '^u22$'       # matrix rows whose name matches a regex
 pwsh test/run.ps1 -KeepImages        # keep dotfiles-test:* images afterwards
+pwsh test/run.ps1 -ListRows          # print the row names (JSON), no docker needed
 ```
 
 Each `test/cases/<case>.sh` runs once per matrix row (Ubuntu 20.04 with and

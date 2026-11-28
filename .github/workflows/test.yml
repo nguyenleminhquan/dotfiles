@@ -1,0 +1,45 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The matrix rows are defined once, in test/run.ps1.
+  rows:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      rows: ${{ steps.list.outputs.rows }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - id: list
+        shell: pwsh
+        run: '"rows=$(./test/run.ps1 -ListRows)" >> $env:GITHUB_OUTPUT'
+
+  test:
+    needs: rows
+    name: ${{ matrix.row }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        row: ${{ fromJSON(needs.rows.outputs.rows) }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - shell: pwsh
+        env:
+          ROW: ${{ matrix.row }}
+          # run.ps1 hands it to the server-profile containers for GitHub downloads.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./test/run.ps1 -Context default -Row "^$env:ROW$"
