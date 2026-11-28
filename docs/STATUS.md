@@ -19,6 +19,8 @@ File ghi tình hình làm việc, sẽ xoá khi xong đợt này. Cập nhật l
 | `c0664c5`, `d91af72` | prompt 2 dòng (starship và prompt minimal): dòng gõ lệnh nằm riêng, có đủ chiều ngang |
 | `4c97568` | test chạy trên GitHub Actions, mỗi row một job; `run.ps1` có thêm `-Row` và `-ListRows` |
 | `c202284` | hỗ trợ Debian 12 và 13 (`lib/detect.sh`), thêm row CI `d12`, `d13`; Debian 11, testing/sid và distro phái sinh vẫn bị từ chối |
+| `c32ce28` | installer: bản `~/.dotfiles` do một lần cài piped bị từ chối để lại không còn chặn lần cài sau (trước đây preflight chạy bằng code cũ đó, nên host Debian 12 bị từ chối mãi). Bản cài sẵn chỉ còn dùng cho `--dry-run` |
+| `7d4f490` | giữ những gì skeleton `.bashrc` của Debian/Ubuntu có: source `~/.bash_aliases`, `ls`/`grep` có màu, lesspipe. Thêm timestamp cho history của bash; Up/Down tìm history theo phần đã gõ (bash và zsh); bash bật `completion-ignore-case` và bracketed paste |
 
 Full suite ở `0ba8740` và ở `9edb830`: 114 PASS / 0 FAIL. Mỗi task đều qua review và một vòng sửa. Từ `2f80505`, full suite chạy trên CI (xem mục Test bên dưới).
 
