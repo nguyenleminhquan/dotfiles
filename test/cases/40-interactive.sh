@@ -287,7 +287,8 @@ rm -f ~/.dircolors
 if [ -x /usr/bin/lesspipe ]; then
   assert_eq "$(bi 'echo "$LESSOPEN|$LESSCLOSE"')" "| /usr/bin/lesspipe %s|/usr/bin/lesspipe %s %s" "lesspipe is set up"
 else
-  assert_eq "$(bi 'echo "${LESSOPEN:-unset}"')" "unset" "no lesspipe, no LESSOPEN"
+  # RHEL's /etc/profile.d/less.sh sets its own LESSOPEN (lesspipe.sh); ours stays out.
+  assert_fail "no /usr/bin/lesspipe, no LESSOPEN of ours" -- grep -qF '/usr/bin/lesspipe %s' <<<"$(bi 'echo "${LESSOPEN:-}"')"
 fi
 printf "alias dfprobe='echo from-bash-aliases'\n" >~/.bash_aliases
 assert_eq "$(bi 'alias dfprobe')" "alias dfprobe='echo from-bash-aliases'" "~/.bash_aliases is read"
