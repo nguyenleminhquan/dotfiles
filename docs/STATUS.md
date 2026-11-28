@@ -18,6 +18,7 @@ File ghi tình hình làm việc, sẽ xoá khi xong đợt này. Cập nhật l
 | `b61a3c8` | fzf-tab lấy từ upstream master `24105b1` (sau tag v1.3.0 ba commit): bỏ lệnh `dd bs=1G` đọc phím gõ trước, lệnh này mất 1–3.5 s mỗi lần Tab trên WSL1 |
 | `c0664c5`, `d91af72` | prompt 2 dòng (starship và prompt minimal): dòng gõ lệnh nằm riêng, có đủ chiều ngang |
 | `4c97568` | test chạy trên GitHub Actions, mỗi row một job; `run.ps1` có thêm `-Row` và `-ListRows` |
+| `c202284` | hỗ trợ Debian 12 và 13 (`lib/detect.sh`), thêm row CI `d12`, `d13`; Debian 11, testing/sid và distro phái sinh vẫn bị từ chối |
 
 Full suite ở `0ba8740` và ở `9edb830`: 114 PASS / 0 FAIL. Mỗi task đều qua review và một vòng sửa. Từ `2f80505`, full suite chạy trên CI (xem mục Test bên dưới).
 
@@ -61,6 +62,8 @@ Trong khoảng 650 ms còn lại, khoảng 100 ms là `~/.localrc` của bạn. 
 Từ 2026-11-28 không chạy test trên docker-1: IO của test làm etcd của các VM khác bị trễ. Full matrix chạy trên GitHub Actions (`.github/workflows/test.yml`, mỗi row một job), còn lúc đang sửa code thì kiểm tra local (WSL, Docker Desktop).
 
 Run CI đầu tiên (#1, `2f80505`): cả 6 row đều pass. Các job chạy song song, cả run mất khoảng 9 phút; cộng dồn thời gian các job khoảng 33 phút. Run này là lần đầu `b61a3c8` (fzf-tab) và các assert prompt 2 dòng chạy trong container. Log từng case phải đăng nhập GitHub mới xem được.
+
+Run CI cho `c202284` (8 row, có 2 row Debian): cả 9 job đều pass, `d12` mất 473 s, `d13` mất 380 s.
 
 ## Để sau (chưa duyệt)
 
