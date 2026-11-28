@@ -45,6 +45,14 @@ zmodload -F zsh/terminfo +p:terminfo 2>/dev/null
 [[ -n ${terminfo[kend]:-} ]] && bindkey "${terminfo[kend]}" end-of-line
 [[ -n ${terminfo[kdch1]:-} ]] && bindkey "${terminfo[kdch1]}" delete-char
 bindkey '^R' history-incremental-pattern-search-backward
+# Up and Down search the history for lines that start with what is typed, as in
+# bash (shell/bashrc). zsh-autosuggestions already knows these widgets.
+autoload -Uz up-line-or-beginning-search down-line-or-beginning-search
+zle -N up-line-or-beginning-search
+zle -N down-line-or-beginning-search
+for _df_k in '^[[A' '^[OA' ${terminfo[kcuu1]:-}; do bindkey "$_df_k" up-line-or-beginning-search; done
+for _df_k in '^[[B' '^[OB' ${terminfo[kcud1]:-}; do bindkey "$_df_k" down-line-or-beginning-search; done
+unset _df_k
 
 # fzf-tab replaces the completion menu with fzf. Upstream wants it after compinit
 # and BEFORE plugins that wrap widgets (zsh-autosuggestions), and fzf's own key

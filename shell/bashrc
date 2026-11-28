@@ -81,12 +81,27 @@ for _df_f in aliases history tools netdebug; do
 done
 unset _df_f
 
+# Readline: Up and Down search the history for lines that start with what is
+# typed (on an empty line they step through it as before), Tab completion
+# ignores case as in zsh, and a pasted block is inserted instead of run line by
+# line (readline turns that on by itself only from bash 5.1; Ubuntu 20.04 has
+# 5.0). Set here rather than in ~/.inputrc, which would replace /etc/inputrc;
+# ~/.bashrc.local can bind the keys differently. \eO* is what the arrows send
+# in application mode (screen, tmux, some terminals).
+bind '"\e[A": history-search-backward' 2>/dev/null
+bind '"\e[B": history-search-forward' 2>/dev/null
+bind '"\eOA": history-search-backward' 2>/dev/null
+bind '"\eOB": history-search-forward' 2>/dev/null
+bind 'set completion-ignore-case on' 2>/dev/null
+bind 'set enable-bracketed-paste on' 2>/dev/null
+
 # What the distribution's skeleton ~/.bashrc used to do for interactive shells
 # and that our file replaces: the user's ~/.bashrc.d/*.sh (the RHEL skeleton's
-# convention), and bash completion, which Debian and Ubuntu enable from the
-# skeleton rather than from /etc/bash.bashrc. A login shell gets completion
-# from /etc/profile.d, and an already loaded one is left alone.
-for _df_f in "$HOME"/.bashrc.d/*.sh; do
+# convention), ~/.bash_aliases (the Debian and Ubuntu one), and bash
+# completion, which Debian and Ubuntu enable from the skeleton rather than from
+# /etc/bash.bashrc. A login shell gets completion from /etc/profile.d, and an
+# already loaded one is left alone.
+for _df_f in "$HOME"/.bashrc.d/*.sh "$HOME/.bash_aliases"; do
   if [ -f "$_df_f" ]; then
     # shellcheck source=/dev/null
     . "$_df_f"

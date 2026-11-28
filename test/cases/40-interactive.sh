@@ -272,6 +272,42 @@ assert_eq "$(editor_for)" "micro:micro" "EDITOR prefers micro"
 assert_eq "$(env PATH="$fx/bin" "$bash_bin" -c '. /src/shell/aliases.sh; export -p' | grep -c -E 'declare -x (EDITOR|VISUAL)=')" "2" "EDITOR and VISUAL exported"
 rm -rf "$fx"
 
+# --- case_skeleton_parity: what the distro skeleton ~/.bashrc gave, and readline keys ---
+bi() { DOTFILES_IN_ZSH=1 bash -ic "$1" 2>/dev/null </dev/null; }
+assert_eq "$(bi 'alias ls grep')" "alias ls='ls --color=auto'
+alias grep='grep --color=auto'" "bash colours ls and grep"
+if [ "$has_zsh" = 1 ]; then
+  assert_eq "$(zsh -ic 'alias ls grep' 2>/dev/null </dev/null)" "ls='ls --color=auto'
+grep='grep --color=auto'" "zsh colours ls and grep"
+fi
+assert_eq "$(bi 'echo "${LS_COLORS:-none}"')" "none" "no dircolors run without a ~/.dircolors"
+printf 'DIR 01;35\n' >~/.dircolors
+assert_ok "a ~/.dircolors of the user's is used" -- grep -q 'di=01;35' <<<"$(bi 'echo "$LS_COLORS"')"
+rm -f ~/.dircolors
+if [ -x /usr/bin/lesspipe ]; then
+  assert_eq "$(bi 'echo "$LESSOPEN|$LESSCLOSE"')" "| /usr/bin/lesspipe %s|/usr/bin/lesspipe %s %s" "lesspipe is set up"
+else
+  assert_eq "$(bi 'echo "${LESSOPEN:-unset}"')" "unset" "no lesspipe, no LESSOPEN"
+fi
+printf "alias dfprobe='echo from-bash-aliases'\n" >~/.bash_aliases
+assert_eq "$(bi 'alias dfprobe')" "alias dfprobe='echo from-bash-aliases'" "~/.bash_aliases is read"
+rm -f ~/.bash_aliases
+assert_eq "$(bi 'echo "$HISTTIMEFORMAT"')" "%F %T " "bash history keeps timestamps"
+binds="$(bi 'bind -p; bind -v')"
+for key in '"\e[A": history-search-backward' '"\e[B": history-search-forward' \
+  '"\eOA": history-search-backward' '"\eOB": history-search-forward' \
+  'set completion-ignore-case on' 'set enable-bracketed-paste on'; do
+  assert_ok "bash readline: $key" -- grep -qxF "$key" <<<"$binds"
+done
+if [ "$has_zsh" = 1 ]; then
+  for key in '^[[A' '^[OA'; do
+    assert_eq "$(zsh -ic "bindkey '$key'" 2>/dev/null </dev/null)" "\"$key\" up-line-or-beginning-search" "zsh: $key searches back by prefix"
+  done
+  for key in '^[[B' '^[OB'; do
+    assert_eq "$(zsh -ic "bindkey '$key'" 2>/dev/null </dev/null)" "\"$key\" down-line-or-beginning-search" "zsh: $key searches forward by prefix"
+  done
+fi
+
 # --- case_app_configs --------------------------------------------------------
 gitcfg=/src/config/git/config
 assert_fail "repo git config carries no identity" -- grep -Eiq '^[[:space:]]*(name|email|signingkey|user)[[:space:]]*(=|$)|\[user\]|\[credential' "$gitcfg"

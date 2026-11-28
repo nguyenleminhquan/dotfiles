@@ -49,6 +49,9 @@ else
   HISTSIZE=100000
   HISTFILESIZE=100000
   HISTCONTROL=ignoreboth
+  # Each entry keeps its time; `history` shows it. zsh stores it already
+  # (share_history writes timestamps); `history -i` shows it there.
+  HISTTIMEFORMAT='%F %T '
   shopt -s histappend
 
   if ! declare -F _df_prompt_command_add >/dev/null 2>&1 && [[ -r ${BASH_SOURCE[0]%/*}/prompt-command.sh ]]; then
