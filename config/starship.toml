@@ -1,12 +1,14 @@
 # Starship prompt for the `server` and `workstation` profiles. It mirrors the
-# minimal prompt: user@host cwd [branch] [context/namespace] $
+# minimal prompt on two lines, so a long command gets the full width:
+#   user@host cwd [branch] [context/namespace]
+#   $
 # Reference: https://starship.rs/config/
 
 add_newline = false
 # Only these modules run, which keeps every prompt cheap. The explicit
 # `disabled = true` entries below stay as a second line of defence in case
 # someone adds $all back.
-format = "$username$hostname$directory$git_branch$git_status$kubernetes$cmd_duration$character"
+format = "$username$hostname$directory$git_branch$git_status$kubernetes$cmd_duration$line_break$character"
 # A module that takes longer than this (ms) is skipped for that prompt.
 command_timeout = 500
 

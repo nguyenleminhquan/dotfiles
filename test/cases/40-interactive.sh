@@ -379,7 +379,13 @@ printf 'current-context: homelab\n' >"$fx/dev"
 bash_prompt() { printf 'exit\n' | DOTFILES_IN_ZSH=1 TERM=xterm-256color KUBECONFIG="$1" timeout 30 script -qec 'bash -i' /dev/null | tr -d '\r'; }
 out="$(bash_prompt "$fx/prod")"
 assert_ok "bash prompt shows ctx/ns in bold red for prod" -- grep -aFq "$(printf '\033[1;31m[gke-prod/argocd]')" <<<"$out"
-assert_ok "bash prompt has user@host and ends with a prompt char" -- grep -aEq "$(id -un)@[^ ]+ .* [\$#] " <<<"$out"
+assert_ok "bash prompt has user@host" -- grep -aEq "$(id -un)@[^ ]+ " <<<"$out"
+# Two lines: the prompt char starts a line of its own (after terminal escapes
+# such as bracketed paste) and is not on the user@host line.
+esc="$(printf '\033')"
+prompt_line_re="^($esc\\[[?0-9;]*[a-zA-Z])*[\$#] "
+assert_ok "bash prompt char starts the second line" -- grep -aEq "$prompt_line_re" <<<"$out"
+assert_fail "bash prompt char is not on the user@host line" -- grep -aEq "$(id -un)@[^ ]+ .* [\$#] " <<<"$out"
 out="$(bash_prompt "$fx/dev")"
 assert_ok "bash prompt shows ctx/ns for non-prod" -- grep -aFq '[homelab/default]' <<<"$out"
 assert_fail "bash prompt is not red for non-prod" -- grep -aFq "$(printf '\033[1;31m')" <<<"$out"
@@ -446,6 +452,8 @@ if [ "$has_zsh" = 1 ]; then
   out="$(zsh_prompt "$fx/prod")"
   assert_ok "zsh prompt shows ctx/ns in bold red for prod" -- grep -aEq "$(printf '\033\\[1m\033\\[31m\\[gke-prod/argocd\\]')" <<<"$out"
   assert_ok "zsh prompt has user@host" -- grep -aEq "$(id -un)@[^ ]+ " <<<"$out"
+  assert_ok "zsh prompt char starts the second line" -- grep -aEq "$prompt_line_re" <<<"$out"
+  assert_fail "zsh prompt char is not on the user@host line" -- grep -aEq "$(id -un)@[^ ]+ .* [\$#] " <<<"$out"
   out="$(zsh_prompt "$fx/dev")"
   assert_ok "zsh prompt shows ctx/ns for non-prod" -- grep -aFq '[homelab/default]' <<<"$out"
   assert_fail "zsh prompt is not red for non-prod" -- grep -aFq "$(printf '\033[31m')" <<<"$out"

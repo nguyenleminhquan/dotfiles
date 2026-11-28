@@ -385,6 +385,9 @@ assert_ok "prod in any case is red" -- grep -aqF -e "$red1" -e "$red2" <<<"$(pro
 out="$(prompt_of "$fx/dev")"
 assert_fail "non-prod context is not red" -- grep -aqF -e "$red1" -e "$red2" <<<"$out"
 assert_ok "non-prod context is shown" -- grep -aFq 'homelab/argocd' <<<"$out"
+esc="$(printf '\033')"
+assert_ok "the prompt char starts a line of its own" -- grep -aEq "^($esc\\[[0-9;]*m)*\\$" <<<"$out"
+assert_fail "the prompt char is not on the context line" -- grep -aq 'homelab/argocd.*\$' <<<"$out"
 assert_fail "starship reports no config problem" -- grep -aqi 'warn\|error' <<<"$out"
 
 # case_interactive_shells

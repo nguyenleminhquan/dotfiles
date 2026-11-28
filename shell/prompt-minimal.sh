@@ -1,6 +1,8 @@
 # shellcheck shell=bash
-# Pure-shell prompt for the minimal profile and for hosts without starship:
-#   user@host cwd [context/namespace] $
+# Pure-shell prompt for the minimal profile and for hosts without starship, on
+# two lines so a long command gets the full width:
+#   user@host cwd [context/namespace]
+#   $
 # The kubernetes part is bold red when the context name contains "prod". It
 # reads the kubeconfig files directly and never runs kubectl, so a slow or
 # unreachable cluster cannot slow the prompt down.
@@ -219,13 +221,13 @@ if [[ -n ${ZSH_VERSION:-} ]]; then
         seg=" [$_df_kube_label]"
       fi
     fi
-    PROMPT="%n@%m %~${seg} %(!.#.\$) "
+    PROMPT="%n@%m %~${seg}"$'\n'"%(!.#.\$) "
     return "$rc"
   }
   autoload -Uz add-zsh-hook
   add-zsh-hook precmd _df_prompt_precmd
   # shellcheck disable=SC2034
-  PROMPT='%n@%m %~ %(!.#.$) '
+  PROMPT='%n@%m %~'$'\n''%(!.#.$) '
 else
   _df_prompt_update() {
     local rc=$?
@@ -248,5 +250,5 @@ else
   _df_prompt_command_add _df_prompt_update
   # The segment sits in a variable so its value is never itself expanded.
   # shellcheck disable=SC2016
-  PS1='\u@\h \w${_df_ps1_kube} \$ '
+  PS1='\u@\h \w${_df_ps1_kube}\n\$ '
 fi
