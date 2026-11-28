@@ -16,6 +16,7 @@ File ghi tình hình làm việc, sẽ xoá khi xong đợt này. Cập nhật l
 | `0ba8740` | `_df_wsl_filter` tách PATH tuyến tính; test đo khởi động với filter bật |
 | `9edb830` | `dotfiles update` chạy installer từ bản copy trong `~/.cache/dotfiles` (WSL1 không cho đổi tên thư mục đang có file mở); báo lỗi rõ khi đổi tên `~/.dotfiles` thất bại |
 | `b61a3c8` | fzf-tab lấy từ upstream master `24105b1` (sau tag v1.3.0 ba commit): bỏ lệnh `dd bs=1G` đọc phím gõ trước, lệnh này mất 1–3.5 s mỗi lần Tab trên WSL1 |
+| `c0664c5` | prompt 2 dòng (starship và prompt minimal): dòng gõ lệnh nằm riêng, có đủ chiều ngang |
 
 Full suite ở `0ba8740` và ở `9edb830`: 114 PASS / 0 FAIL. Mỗi task đều qua review và một vòng sửa.
 
@@ -56,6 +57,12 @@ Trong khoảng 650 ms còn lại, khoảng 100 ms là `~/.localrc` của bạn. 
 - Cache không tự làm mới khi đổi biến `MISE_*`, hoặc khi config/installs nằm ngoài `~/.config/mise` và `~/.local/share/mise`. Chạy `dotfiles update` để làm mới.
 - Shell non-interactive trên WSL1 dùng version global của tool, không theo `mise.toml` của project (ví dụ cron `cd proj && node`).
 
+## Test: không chạy trên docker-1 nữa
+
+Từ 2026-11-28 không chạy test trên docker-1: IO của test làm etcd của các VM khác bị trễ. Full matrix chạy trên GitHub Actions (`.github/workflows/test.yml`, mỗi row một job), còn lúc đang sửa code thì kiểm tra local (WSL, Docker Desktop).
+
+Chưa có run CI nào. `b61a3c8` (fzf-tab) và `c0664c5` (prompt 2 dòng, assert mới trong case 40 và 50) sẽ được kiểm chứng ở run đầu tiên.
+
 ## Để sau (chưa duyệt)
 
-GitHub Actions CI, tag release, plugin 5, cùng vài điểm nhỏ còn lại từ review (ghi trong ledger local).
+Tag release, plugin 5, cùng vài điểm nhỏ còn lại từ review (ghi trong ledger local).
